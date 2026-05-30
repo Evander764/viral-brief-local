@@ -1,0 +1,29 @@
+{
+  "name": "viral-brief-local",
+  "version": "1.0.0",
+  "description": "爆款选题雷达 Local — 本地内容情报工作台：浏览器插件采集 + 本地服务筛选 + AI 每日爆款选题日报。零原生依赖，接入 API Key 即可自动运行。",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "report": "node --disable-warning=ExperimentalWarning scripts/run-report.js",
+    "package:mac": "node scripts/package-macos-app.js"
+  },
+  "keywords": [
+    "viral",
+    "content-radar",
+    "local-first",
+    "sqlite",
+    "ai",
+    "douyin",
+    "xiaohongshu",
+    "wechat-channels"
+  ],
+  "license": "MIT",
+  "private": true,
+  "dependencies": {}
+}

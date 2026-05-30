@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>爆款选题雷达 Local</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script>
+    window.__VB_TOKEN__ = '%%VB_TOKEN%%';
+    window.__VB_PORT__ = %%VB_PORT%%;
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📡 爆款选题雷达 <span>Local</span></div>
+    <nav class="tabs">
+      <button data-tab="overview" class="active">概览</button>
+      <button data-tab="candidates">今日候选 <span class="dot" id="candCount"></span></button>
+      <button data-tab="library">内容库</button>
+      <button data-tab="accounts">账号池</button>
+      <button data-tab="reports">日报</button>
+      <button data-tab="settings">设置</button>
+    </nav>
+    <div class="keystate" id="keyState"></div>
+  </header>
+
+  <main>
+    <!-- 概览 -->
+    <section id="tab-overview" class="tab">
+      <div class="cards" id="statCards"></div>
+      <div class="panel">
+        <h3>生成每日爆款选题日报</h3>
+        <div class="row">
+          <label>时间窗口
+            <select id="ovWindow">
+              <option value="last_3_days">最近 3 天</option>
+              <option value="last_7_days">最近 7 天</option>
+            </select>
+          </label>
+          <button class="primary" id="ovGenerate">立即生成日报</button>
+          <span class="muted" id="ovGenMsg"></span>
+        </div>
+        <p class="muted">入选条件（硬阈值，由系统确定性判定）：来自账号池的抖音 / 小红书 / 视频号内容，点赞 ≥ 1000 <b>且</b> 转发/分享 ≥ 1000，且已人工确认。</p>
+      </div>
+    </section>
+
+    <!-- 今日候选 -->
+    <section id="tab-candidates" class="tab hidden">
+      <div class="panel">
+        <h3>今日候选池 <span class="muted">— 待你确认/补录指标的内容</span></h3>
+        <p class="muted">只有关联到账号池并「确认」后、且点赞与转发均 ≥ 1000 的三平台内容，才会进入正式日报。缺转发数的内容停留在「待补录」，不会被自动算作达标。</p>
+        <div id="candList" class="list"></div>
+      </div>
+    </section>
+
+    <!-- 内容库 -->
+    <section id="tab-library" class="tab hidden">
+      <div class="panel">
+        <h3>内容库</h3>
+        <div class="row filters">
+          <input id="libQ" placeholder="搜索标题/作者…" />
+          <select id="libStatus">
+            <option value="">全部状态</option>
+            <option value="confirmed">已确认</option>
+            <option value="needs_review">待复核</option>
+            <option value="missing_share">缺转发数</option>
+            <option value="missing_like">缺点赞数</option>
+            <option value="below_threshold">未达阈值</option>
+            <option value="duplicate">重复</option>
+            <option value="archived">已归档</option>
+          </select>
+          <select id="libPlatform">
+            <option value="">全部平台</option>
+            <option value="douyin">抖音</option>
+            <option value="xiaohongshu">小红书</option>
+            <option value="wechat_channels">视频号</option>
+            <option value="wechat_article">公众号文章</option>
+            <option value="other">其他</option>
+          </select>
+          <button id="libRefresh">刷新</button>
+        </div>
+        <div id="libTable"></div>
+      </div>
+    </section>
+
+    <!-- 账号池 -->
+    <section id="tab-accounts" class="tab hidden">
+      <div class="panel">
+        <h3>账号池 <span class="muted">— 你关注的商业博主</span></h3>
+        <div class="row">
+          <input id="acNick" placeholder="昵称" />
+          <select id="acPlatform">
+            <option value="douyin">抖音</option>
+            <option value="xiaohongshu">小红书</option>
+            <option value="wechat_channels">视频号</option>
+            <option value="other">其他</option>
+          </select>
+          <input id="acUrl" placeholder="主页链接" />
+          <input id="acCategory" placeholder="分类(商业/AI/创业…)" />
+          <select id="acPriority"><option>S</option><option>A</option><option selected>B</option></select>
+          <button class="primary" id="acAdd">添加</button>
+        </div>
+        <div class="row">
+          <label class="filebtn">导入 CSV<input type="file" id="acCsv" accept=".csv" hidden /></label>
+          <span class="muted">表头：platform,nickname,homepage_url,category,priority,monitor_enabled</span>
+        </div>
+        <div id="acTable"></div>
+      </div>
+    </section>
+
+    <!-- 日报 -->
+    <section id="tab-reports" class="tab hidden">
+      <div class="panel">
+        <h3>日报</h3>
+        <div class="row">
+          <select id="rpWindow">
+            <option value="last_3_days">最近 3 天</option>
+            <option value="last_7_days">最近 7 天</option>
+          </select>
+          <button class="primary" id="rpGenerate">生成日报</button>
+          <span class="muted" id="rpMsg"></span>
+        </div>
+        <div id="rpList" class="list"></div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="tab-settings" class="tab hidden">
+      <div class="panel">
+        <h3>AI API Key（BYOK）</h3>
+        <div class="grid2">
+          <label>供应商
+            <select id="stProvider">
+              <option value="openai">OpenAI</option>
+              <option value="openai-compatible">OpenAI 兼容接口</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </label>
+          <label>模型名（分析）<input id="stModel" placeholder="如 gpt-4o-mini / claude-haiku-4-5" /></label>
+          <label>日报模型（可留空=同上，建议用更强模型）<input id="stReportModel" placeholder="如 gpt-4o / claude-sonnet-4-6" /></label>
+          <label>Base URL（可选/兼容接口或代理）<input id="stBaseUrl" placeholder="留空用默认" /></label>
+        </div>
+        <div class="row">
+          <input id="stApiKey" type="password" placeholder="粘贴 API Key（加密存储，不外传）" />
+          <button class="primary" id="stSaveKey">保存 Key</button>
+          <button id="stTestKey">测试调用</button>
+          <button class="danger" id="stClearKey">清除 Key</button>
+          <span class="muted" id="stKeyState"></span>
+        </div>
+
+        <h3>自动运行（接入 Key 后每天自动产出日报）</h3>
+        <div class="grid2">
+          <label class="check"><input type="checkbox" id="stSchedEnabled" /> 开启每日自动生成</label>
+          <label>每日时间<input id="stSchedTime" type="time" value="09:00" /></label>
+          <label>默认窗口
+            <select id="stSchedWindow">
+              <option value="last_3_days">最近 3 天</option>
+              <option value="last_7_days">最近 7 天</option>
+            </select>
+          </label>
+          <label>每日 token 预算提醒（0=不限）<input id="stBudget" type="number" min="0" value="0" /></label>
+        </div>
+        <div class="row"><button class="primary" id="stSaveSettings">保存设置</button><span class="muted" id="stSaveMsg"></span></div>
+
+        <h3>浏览器插件配对</h3>
+        <p class="muted">在插件「选项」里填入本机地址与下面的配对 token，即可让插件把内容保存到桌面端。</p>
+        <div class="row">
+          <code class="token" id="stToken"></code>
+          <button id="stCopyToken">复制 token</button>
+          <button class="danger" id="stRegenToken">重置 token</button>
+        </div>
+        <p class="muted">本机服务地址：<code id="stEndpoint"></code></p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

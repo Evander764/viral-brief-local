@@ -1,0 +1,22 @@
+# 运行时本地数据（数据库、截图、导出、密钥、配置）——绝不入库
+/data/
+/dist/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 密钥与配置
+.env
+data/config.json
+data/.keyfile
+
+# 依赖与系统
+node_modules/
+.DS_Store
+*.log
+npm-debug.log*
+
+# 编辑器
+.vscode/
+.idea/
