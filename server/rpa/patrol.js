@@ -10,6 +10,7 @@
  */
 import { join } from 'node:path';
 import { writeFileSync, mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { all } from '../db.js';
 import { upsertCapture } from '../store.js';
 import { SCREENSHOTS_DIR } from '../lib/paths.js';
@@ -131,7 +132,7 @@ async function patrolDouyin(client, acc, progress) {
   await assertNotBlocked(client, 'douyin');
 
   // 获取最新视频链接
-  const postUrl = await waitForPostUrl(client, 'douyin');
+  const postUrl = (await waitForPostUrls(client, 'douyin'))[0];
 
   if (!postUrl) {
     progress('  未找到最新视频链接');
@@ -145,6 +146,7 @@ async function patrolDouyin(client, acc, progress) {
 
   // 提取数据
   const data = buildCaptureData(await extractPageRaw(client, 'douyin'), 'douyin');
+  const finalUrl = isDetailUrl('douyin', data.pageUrl) ? data.pageUrl : postUrl;
 
   progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}`);
 
@@ -152,7 +154,7 @@ async function patrolDouyin(client, acc, progress) {
   const screenshotPath = await takeScreenshot(client, acc, 'douyin');
   progress(`  已截图: ${screenshotPath}`);
 
-  return saveData(acc, data.pageUrl || postUrl, data, screenshotPath);
+  return saveData(acc, finalUrl, data, screenshotPath);
 }
 
 async function patrolXiaohongshu(client, acc, progress) {
@@ -162,33 +164,47 @@ async function patrolXiaohongshu(client, acc, progress) {
   await assertNotBlocked(client, 'xiaohongshu');
 
   // 获取最新笔记链接
-  const postUrl = await waitForPostUrl(client, 'xiaohongshu');
+  const postUrls = await waitForPostUrls(client, 'xiaohongshu');
 
-  if (!postUrl) {
+  if (postUrls.length === 0) {
     progress('  未找到最新笔记链接');
     return null;
   }
 
-  progress(`  进入最新笔记: ${postUrl}`);
-  await client.goto(postUrl);
-  await client.sleep(4000);
-  await assertNotBlocked(client, 'xiaohongshu');
+  progress(`  找到 ${postUrls.length} 个候选笔记，按最新顺序尝试`);
+  for (let i = 0; i < Math.min(postUrls.length, 8); i++) {
+    const postUrl = postUrls[i];
+    progress(`  进入候选笔记 ${i + 1}: ${postUrl}`);
+    await client.goto(postUrl);
+    await client.sleep(8000);
+    await assertNotBlocked(client, 'xiaohongshu');
 
-  const data = buildCaptureData(await extractPageRaw(client, 'xiaohongshu'), 'xiaohongshu');
+    const raw = await extractPageRaw(client, 'xiaohongshu');
+    const data = buildCaptureData(raw, 'xiaohongshu');
+    const finalUrl = isDetailUrl('xiaohongshu', data.pageUrl) ? data.pageUrl : postUrl;
 
-  progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}`);
+    if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
+      progress(`  候选笔记不可采，跳过: ${data.title || raw.pageUrl || postUrl}`);
+      continue;
+    }
 
-  const screenshotPath = await takeScreenshot(client, acc, 'xiaohongshu');
-  progress(`  已截图: ${screenshotPath}`);
+    progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}`);
 
-  return saveData(acc, data.pageUrl || postUrl, data, screenshotPath);
+    const screenshotPath = await takeScreenshot(client, acc, 'xiaohongshu');
+    progress(`  已截图: ${screenshotPath}`);
+
+    return saveData(acc, finalUrl, data, screenshotPath);
+  }
+
+  progress('  候选笔记均未能打开可采详情');
+  return null;
 }
 
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
 
-function postLinkScript(platform) {
+function postLinksScript(platform) {
   return `
     (() => {
       const platform = ${JSON.stringify(platform)};
@@ -211,28 +227,35 @@ function postLinkScript(platform) {
         } catch {}
         return false;
       };
+      const out = [];
+      const seen = new Set();
+      const push = (href) => {
+        if (!href || seen.has(href)) return;
+        seen.add(href);
+        out.push(href);
+      };
       const links = [...document.querySelectorAll('a[href]')];
       for (const a of links) {
         const href = toAbs(a.getAttribute('href') || a.href);
-        if (isDetail(href) && isVisible(a)) return href;
+        if (isDetail(href) && isVisible(a)) push(href);
       }
       for (const a of links) {
         const href = toAbs(a.getAttribute('href') || a.href);
-        if (isDetail(href)) return href;
+        if (isDetail(href)) push(href);
       }
-      return null;
+      return out;
     })()
   `;
 }
 
-async function waitForPostUrl(client, platform, timeoutMs = 12000) {
+async function waitForPostUrls(client, platform, timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const url = await client.evaluate(postLinkScript(platform));
-    if (url) return url;
+    const urls = await client.evaluate(postLinksScript(platform));
+    if (Array.isArray(urls) && urls.length > 0) return urls;
     await client.sleep(700);
   }
-  return null;
+  return [];
 }
 
 async function assertNotBlocked(client, platform) {
@@ -329,6 +352,33 @@ function buildCaptureData(raw, platform) {
   };
 }
 
+function isDetailUrl(platform, url) {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    if (platform === 'douyin') return /\/video\/[^/?#]+/.test(u.pathname);
+    if (platform === 'xiaohongshu') {
+      return /\/explore\/[^/?#]+/.test(u.pathname) || /\/discovery\/item\/[^/?#]+/.test(u.pathname);
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function isUnavailablePage(raw = {}) {
+  const text = `${raw.title || ''}\n${raw.pageUrl || ''}\n${raw.textSample || ''}`;
+  return /页面不见了|暂时无法浏览|error_code=|\/404\b|404/.test(text)
+    || ((raw.pageUrl || '').endsWith('/explore') && /小红书\s*-\s*你的生活兴趣社区/.test(raw.title || ''));
+}
+
+function hasCaptureSignal(data = {}) {
+  return Boolean(
+    data.title && data.title !== '小红书 - 你的生活兴趣社区'
+    && (data.like !== null || data.share !== null || data.comment !== null || data.favorite !== null)
+  );
+}
+
 function cleanupTitle(title, platform) {
   const s = String(title || '').trim();
   if (!s) return '';
@@ -423,7 +473,7 @@ function parseHumanTime(str) {
 }
 
 // 如果是直接运行该脚本，则自动执行（向后兼容）
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const { CDPClient } = await import('./cdp.js');
   const { launchChrome, killChrome } = await import('./chrome-launcher.js');
   const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
@@ -434,6 +484,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(JSON.stringify(result, null, 2));
   } finally {
     client.close();
-    if (chrome.child) killChrome(chrome.child);
+    if (chrome.closeOnDone && chrome.child) killChrome(chrome.child);
   }
 }

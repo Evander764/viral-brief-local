@@ -2,15 +2,16 @@
  * Chrome 进程管理器。
  *
  * 自动启动一个带有 --remote-debugging-port 的 Chrome 实例，
- * 并等待端口就绪后返回。默认使用用户真实 Chrome 资料目录，让小红书/抖音沿用
- * 已登录 Cookie；如需隔离资料目录，可设置 VB_RPA_CHROME_MODE=isolated。
+ * 并等待端口就绪后返回。默认从用户真实 Chrome 资料目录同步一份本地 RPA
+ * 登录态镜像，让小红书/抖音沿用已登录 Cookie；如需隔离空资料目录，可设置
+ * VB_RPA_CHROME_MODE=isolated。
  *
  * 关键改进：
  * - 支持多路径查找 Chrome（Chrome / Chrome Canary / Chromium）
  * - `isPortReady` 真正校验 JSON 响应（避免 "Using unsafe..." 类似非 JSON 被当作 ready）
  * - 更清晰的错误信息帮助用户排查
  */
-import { execFile, execSync } from 'node:child_process';
+import { execFile, execFileSync, execSync } from 'node:child_process';
 import { mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -76,6 +77,44 @@ function isChromeRunning() {
   }
 }
 
+function shouldAutoRelaunchChrome() {
+  return String(process.env.VB_RPA_CHROME_AUTO_RELAUNCH || 'true').toLowerCase() !== 'false';
+}
+
+async function waitForChromeExit(timeoutMs = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!isChromeRunning()) return true;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return !isChromeRunning();
+}
+
+async function quitRunningChromeForRpa(userDataDir) {
+  if (!shouldAutoRelaunchChrome()) {
+    throw new Error(
+      '当前 Chrome 已在运行，但没有开启 RPA 调试端口，应用无法直接接管它。\n' +
+      '请先完全退出 Google Chrome，再点「一键自动巡检」。应用会用同一份已登录资料目录重新打开 Chrome，登录态会保留。\n' +
+      `使用的资料目录：${userDataDir}`
+    );
+  }
+
+  log.info('当前 Chrome 未开启调试端口，正在温和退出并用已登录资料目录重开。');
+  try {
+    execFileSync('osascript', ['-e', 'tell application "Google Chrome" to quit'], { timeout: 5000 });
+  } catch (e) {
+    log.warn(`请求 Chrome 退出失败: ${e.message}`);
+  }
+
+  const exited = await waitForChromeExit();
+  if (!exited) {
+    throw new Error(
+      '已请求退出 Google Chrome，但它仍在运行，无法用同一登录资料目录开启 RPA。\n' +
+      '请保存当前页面内容并手动退出 Chrome 后重试。'
+    );
+  }
+}
+
 function readChromeProfile(userDataDir) {
   const envProfile = String(process.env.VB_RPA_CHROME_PROFILE || '').trim();
   if (envProfile) return envProfile;
@@ -94,11 +133,12 @@ function resolveChromeSession(opts = {}) {
   const mode = String(process.env.VB_RPA_CHROME_MODE || opts.mode || 'logged-in').toLowerCase();
   const explicitDir = opts.dataDir || process.env.VB_RPA_CHROME_USER_DATA_DIR;
   if (explicitDir) {
-    const userDataDir = resolve(explicitDir);
+    const sourceUserDataDir = resolve(explicitDir);
     return {
       mode: 'custom',
-      userDataDir,
-      profileDirectory: readChromeProfile(userDataDir),
+      userDataDir: CHROME_PROFILE_DIR,
+      sourceUserDataDir,
+      profileDirectory: readChromeProfile(sourceUserDataDir),
       expectsLoggedInProfile: true,
     };
   }
@@ -107,6 +147,7 @@ function resolveChromeSession(opts = {}) {
     return {
       mode,
       userDataDir: CHROME_PROFILE_DIR,
+      sourceUserDataDir: null,
       profileDirectory: 'Default',
       expectsLoggedInProfile: false,
     };
@@ -114,10 +155,41 @@ function resolveChromeSession(opts = {}) {
 
   return {
     mode: 'logged-in',
-    userDataDir: LOGGED_IN_CHROME_DIR_MAC,
+    userDataDir: CHROME_PROFILE_DIR,
+    sourceUserDataDir: LOGGED_IN_CHROME_DIR_MAC,
     profileDirectory: readChromeProfile(LOGGED_IN_CHROME_DIR_MAC),
     expectsLoggedInProfile: true,
   };
+}
+
+function syncLoggedInProfile(session) {
+  if (!session.expectsLoggedInProfile || !session.sourceUserDataDir) return;
+  if (!existsSync(session.sourceUserDataDir)) {
+    throw new Error(`未找到已登录 Chrome 资料目录：${session.sourceUserDataDir}`);
+  }
+
+  mkdirSync(session.userDataDir, { recursive: true });
+  const excludes = [
+    '--exclude=Singleton*',
+    '--exclude=RunningChromeVersion',
+    '--exclude=Crashpad',
+    '--exclude=BrowserMetrics*',
+    '--exclude=*/Cache',
+    '--exclude=*/Code Cache',
+    '--exclude=*/GPUCache',
+    '--exclude=*/GrShaderCache',
+    '--exclude=*/GraphiteDawnCache',
+    '--exclude=*/ShaderCache',
+    '--exclude=*/DawnCache',
+  ];
+  log.info(`同步已登录 Chrome 资料到 RPA 镜像: ${session.sourceUserDataDir} -> ${session.userDataDir}`);
+  execFileSync('rsync', [
+    '-a',
+    '--delete',
+    ...excludes,
+    `${session.sourceUserDataDir}/`,
+    `${session.userDataDir}/`,
+  ], { timeout: 120000 });
 }
 
 function commandUsesUserDataDir(command, userDataDir) {
@@ -137,6 +209,7 @@ function commandUsesUserDataDir(command, userDataDir) {
  */
 export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 15000, mode } = {}) {
   const session = resolveChromeSession({ dataDir, mode });
+  const closeOnDone = !session.expectsLoggedInProfile;
 
   // 先检查端口是否已经可用（用户可能已经手动启动了 Chrome）
   if (await isPortReady(port)) {
@@ -149,17 +222,14 @@ export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 1500
       );
     }
     log.info(`Chrome 调试端口 ${port} 已就绪（外部启动），跳过启动。`);
-    return { child: null, port, userDataDir: session.userDataDir, profileDirectory: session.profileDirectory };
+    return { child: null, port, userDataDir: session.userDataDir, profileDirectory: session.profileDirectory, closeOnDone: false };
   }
 
   if (session.expectsLoggedInProfile && process.platform === 'darwin' && isChromeRunning()) {
-    throw new Error(
-      '当前 Chrome 已在运行，但没有开启 RPA 调试端口，应用无法直接接管它。\n' +
-      '请先完全退出 Google Chrome，再点「一键自动巡检」。应用会用同一份已登录资料目录重新打开 Chrome，登录态会保留。\n' +
-      `使用的资料目录：${session.userDataDir}`
-    );
+    await quitRunningChromeForRpa(session.sourceUserDataDir || session.userDataDir);
   }
 
+  syncLoggedInProfile(session);
   mkdirSync(session.userDataDir, { recursive: true });
 
   const chromePath = findChromePath();
@@ -201,7 +271,7 @@ export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 1500
   }
 
   log.info(`Chrome 已就绪，调试端口 ${port}`);
-  return { child, port, userDataDir: session.userDataDir, profileDirectory: session.profileDirectory };
+  return { child, port, userDataDir: session.userDataDir, profileDirectory: session.profileDirectory, closeOnDone };
 }
 
 /**

@@ -68,7 +68,7 @@ export async function runDailyReport({
     try {
       // 启动或连接 Chrome
       const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
-      chromeChild = chrome.child;
+      chromeChild = chrome.closeOnDone ? chrome.child : null;
 
       // 连接 CDP
       progress('rpa', '正在连接浏览器...');

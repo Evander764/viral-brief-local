@@ -184,7 +184,7 @@ async function handleApi(req, res, url, segs) {
     let client = null;
     try {
       const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
-      chromeChild = chrome.child;
+      chromeChild = chrome.closeOnDone ? chrome.child : null;
       client = new CDPClient();
       await client.connect(chrome.port);
       const result = await runPatrol(client);
