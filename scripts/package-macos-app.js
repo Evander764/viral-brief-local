@@ -30,6 +30,8 @@ const bundledAppDir = join(resourcesDir, 'app');
 
 const excludes = new Set([
   '.git',
+  '.chrome-data',
+  '.claude',
   '.DS_Store',
   'data',
   'dist',
@@ -48,7 +50,7 @@ function copyProject() {
     const src = join(ROOT, name);
     if (existsSync(src)) cpSync(src, join(bundledAppDir, name), { recursive: true });
   }
-  for (const name of ['extension', 'scripts', 'server', 'test', 'web']) {
+  for (const name of ['extension', 'scripts', 'server', 'skills', 'test', 'web']) {
     const src = join(ROOT, name);
     if (existsSync(src) && shouldCopy(src)) cpSync(src, join(bundledAppDir, name), { recursive: true });
   }
@@ -106,9 +108,12 @@ if command -v curl >/dev/null 2>&1 && curl -fsS "$URL/api/health" >/dev/null 2>&
   exit 0
 fi
 
+export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 NODE_BIN=""
 if command -v node >/dev/null 2>&1; then
   NODE_BIN="$(command -v node)"
+elif [[ -x "${process.execPath}" ]]; then
+  NODE_BIN="${process.execPath}"
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
@@ -165,6 +170,8 @@ function makeArchives() {
     '--exclude', './dist',
     '--exclude', './node_modules',
     '--exclude', './.git',
+    '--exclude', './.claude',
+    '--exclude', './.chrome-data',
     '--exclude', './*.log',
     '-czf',
     sourceArchive,

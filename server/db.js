@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS daily_reports (
   export_md_path TEXT,
   export_html_path TEXT,
   export_csv_path TEXT,
+  export_zip_path TEXT,
   created_at TEXT
 );
 
@@ -107,6 +108,13 @@ CREATE TABLE IF NOT EXISTS meta (
 `;
 
 db.exec(SCHEMA);
+
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+
+ensureColumn('daily_reports', 'export_zip_path', 'export_zip_path TEXT');
 
 /** node:sqlite 只接受 null/number/bigint/string/Uint8Array。统一清洗参数。 */
 export function sanitize(v) {

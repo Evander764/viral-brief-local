@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderMarkdown, renderHtml, renderCsv, fallbackReportData } from '../server/report/render.js';
+import { createZip } from '../server/report/archive.js';
 
 const items = [
   { id: 'a', platform: 'douyin', content_type: 'video', author_name: '王', title: '标题A', url: 'https://d/1', like_count: 12000, share_count: 2100, comment_count: 800, favorite_count: 300, publish_time: '2026-05-29T10:00:00.000Z' },
@@ -52,4 +53,16 @@ test('0 达标时 fallback 不含母题且提示样本不足', () => {
   assert.match(fb.daily_summary, /样本不足|不足|暂无/);
   const md = renderMarkdown(fb, [], {}, { ...meta, aiUsed: false });
   assert.match(md, /本期无达标内容|样本不足|暂无/);
+});
+
+test('日报压缩包为标准 ZIP，包含多份导出文件', () => {
+  const zip = createZip([
+    { name: 'report.md', data: renderMarkdown(reportData, items, analyses, meta) },
+    { name: 'report.html', data: renderHtml(reportData, items, analyses, meta) },
+    { name: 'report.csv', data: renderCsv(items, analyses) },
+  ]);
+  assert.equal(zip.subarray(0, 4).toString('hex'), '504b0304');
+  assert.match(zip.toString('latin1'), /report\.md/);
+  assert.match(zip.toString('latin1'), /report\.html/);
+  assert.match(zip.toString('latin1'), /report\.csv/);
 });

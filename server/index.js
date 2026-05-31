@@ -10,25 +10,30 @@
  */
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { writeFileSync, existsSync, createReadStream, statSync } from 'node:fs';
+import { writeFileSync, existsSync, createReadStream, statSync, unlinkSync } from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { CDPClient } from './rpa/cdp.js';
+import { runPatrol } from './rpa/patrol.js';
+import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 
 import { WEB_DIR, SCREENSHOTS_DIR, ensureDirs } from './lib/paths.js';
 import { log } from './lib/log.js';
 import {
-  loadConfig, getPublicConfig, saveConfig, setApiKey, clearApiKey, hasApiKey, regeneratePairingToken,
+  loadConfig, getPublicConfig, saveConfig, setApiKey, clearApiKey, hasApiKey,
+  setApiKey2, clearApiKey2, regeneratePairingToken,
 } from './config.js';
 import {
   upsertCapture, confirmContent, archiveContent, deleteContent, getContent, listContents,
-  countsByStatus, listAccounts, upsertAccount, deleteAccount, importAccountsCsv,
-  listReports, getReport, getUsageForDay, getAnalysis,
+  countsByStatus, listAccounts, upsertAccount, deleteAccount, importAccountsCsv, importAccountsLines,
+  listReports, getReport, deleteReport, getUsageForDay, getAnalysis,
 } from './store.js';
 import { runDailyReport } from './pipeline.js';
 import { startScheduler, restartScheduler } from './scheduler.js';
 import { testConnection } from './ai/client.js';
-import { analyzeContent } from './ai/analyze.js';
+import { analyzeContent, suggestAccountsFromAI } from './ai/analyze.js';
+
 
 ensureDirs();
 const cfg = loadConfig();
@@ -88,6 +93,15 @@ async function serveStatic(res, filePath, { inline = true, downloadName } = {}) 
   if (!inline) headers['content-disposition'] = `attachment; filename="${encodeURIComponent(downloadName || basename(filePath))}"`;
   res.writeHead(200, headers);
   createReadStream(filePath).pipe(res);
+}
+
+function removeReportFiles(report) {
+  for (const p of [
+    report.export_md_path, report.export_html_path, report.export_csv_path, report.export_zip_path,
+  ]) {
+    if (!p) continue;
+    try { if (existsSync(p)) unlinkSync(p); } catch (e) { log.warn(`删除日报文件失败：${p} ${e.message}`); }
+  }
 }
 
 async function serveIndex(res) {
@@ -153,6 +167,46 @@ async function handleApi(req, res, url, segs) {
       clearApiKey();
       return sendJson(res, 200, getPublicConfig());
     }
+    if (p[1] === 'apikey2' && method === 'POST') {
+      const { apiKey } = await readJson(req);
+      setApiKey2(apiKey);
+      return sendJson(res, 200, getPublicConfig());
+    }
+    if (p[1] === 'apikey2' && method === 'DELETE') {
+      clearApiKey2();
+      return sendJson(res, 200, getPublicConfig());
+    }
+  }
+
+  // ---- rpa patrol ----
+  if (p[0] === 'patrol' && p[1] === 'run' && method === 'POST') {
+    let chromeChild = null;
+    let client = null;
+    try {
+      const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
+      chromeChild = chrome.child;
+      client = new CDPClient();
+      await client.connect(chrome.port);
+      const result = await runPatrol(client);
+      return sendJson(res, 200, { success: true, ...result });
+    } catch (e) {
+      log.error('巡检失败: ' + e.message);
+      // 对常见错误给出更友好的前端提示
+      let userMsg = e.message;
+      if (e.message.includes('未找到 Chrome')) {
+        userMsg = '未找到 Chrome 浏览器。请安装 Google Chrome 后重试。';
+      } else if (e.message.includes('启动超时')) {
+        userMsg = 'Chrome 启动超时。请关闭所有 Chrome 窗口后重试，或手动运行: npm run rpa:chrome';
+      }
+      return sendJson(res, 500, { error: userMsg });
+    } finally {
+      if (client) client.close();
+      if (chromeChild) killChrome(chromeChild);
+    }
+  }
+
+  // ---- settings - additional ----
+  if (p[0] === 'settings') {
     if (p[1] === 'test' && method === 'POST') {
       try {
         const r = await testConnection();
@@ -210,9 +264,23 @@ async function handleApi(req, res, url, segs) {
   if (p[0] === 'accounts') {
     if (p.length === 1 && method === 'GET') return sendJson(res, 200, listAccounts());
     if (p.length === 1 && method === 'POST') return sendJson(res, 200, upsertAccount(await readJson(req)));
+    if (p[1] === 'search-suggest' && method === 'POST') {
+      const { q } = await readJson(req);
+      if (!q || !q.trim()) return sendJson(res, 400, { error: '查询内容不能为空' });
+      try {
+        const r = await suggestAccountsFromAI(q);
+        return sendJson(res, 200, r);
+      } catch (e) {
+        return sendJson(res, 500, { error: String(e.message) });
+      }
+    }
     if (p[1] === 'import' && method === 'POST') {
       const { csv } = await readJson(req);
       return sendJson(res, 200, importAccountsCsv(csv || ''));
+    }
+    if (p[1] === 'import-lines' && method === 'POST') {
+      const { text } = await readJson(req);
+      return sendJson(res, 200, importAccountsLines(text || ''));
     }
     if (p[1] && method === 'DELETE') { deleteAccount(p[1]); return sendJson(res, 200, { ok: true }); }
   }
@@ -222,19 +290,42 @@ async function handleApi(req, res, url, segs) {
     if (p.length === 1 && method === 'GET') return sendJson(res, 200, listReports());
     if (p[1] === 'generate' && method === 'POST') {
       const body = await readJson(req);
-      const r = await runDailyReport({ windowType: body.window || cfg.schedule.window, force: !!body.force });
-      return sendJson(res, 200, { id: r.report.id, eligibleCount: r.eligibleCount, aiUsed: r.aiUsed });
+      try {
+        const r = await runDailyReport({
+          windowType: body.window || cfg.schedule.window,
+          force: !!body.force,
+          skipRpa: body.skipRpa === true,
+        });
+        return sendJson(res, 200, {
+          id: r.report.id,
+          eligibleCount: r.eligibleCount,
+          aiUsed: r.aiUsed,
+          patrolResult: r.patrolResult || null,
+        });
+      } catch (e) {
+        return sendJson(res, 200, { error: String(e.message || e) });
+      }
     }
     const id = p[1];
     if (id && p.length === 2 && method === 'GET') {
       const r = getReport(id);
       return r ? sendJson(res, 200, r) : sendJson(res, 404, { error: '未找到' });
     }
+    if (id && p.length === 2 && method === 'DELETE') {
+      const r = deleteReport(id);
+      if (!r) return sendJson(res, 404, { error: '未找到' });
+      removeReportFiles(r);
+      return sendJson(res, 200, { ok: true });
+    }
     if (id && p[2] === 'export' && method === 'GET') {
       const r = getReport(id);
       if (!r) return sendJson(res, 404, { error: '未找到' });
       const fmt = url.searchParams.get('format') || 'md';
-      const path = fmt === 'html' ? r.export_html_path : fmt === 'csv' ? r.export_csv_path : r.export_md_path;
+      const path = fmt === 'html' ? r.export_html_path
+        : fmt === 'csv' ? r.export_csv_path
+          : fmt === 'zip' ? r.export_zip_path
+            : r.export_md_path;
+      if (!path) return sendJson(res, 404, { error: '导出文件不存在' });
       const inline = url.searchParams.get('inline') === '1';
       return serveStatic(res, path, { inline, downloadName: basename(path) });
     }

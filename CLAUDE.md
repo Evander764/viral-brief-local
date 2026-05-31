@@ -22,7 +22,7 @@
 ## 数据流
 - 采集：插件 `popup.js` 注入页面提取 → `POST /api/capture`（带 `x-vb-token`）→ `store.upsertCapture()`：标准化指标、算 url_key/fingerprint、去重合并、`computeDataStatus`、落库。截图存 `data/screenshots/`，DB 存路径。
 - 确认：仪表盘候选池 → `POST /api/contents/:id/confirm` → `store.confirmContent()`：重算指标、强制 `metrics_source='manual'` + `user_confirmed=1`、重算状态。
-- 出报：`pipeline.runDailyReport({windowType})`：`recomputeAll(窗口)` → `getEligible(窗口起点)`（三平台 + 账号池 + confirmed + 双 1000）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`。0 达标则用 `fallbackReportData` 跳过 AI。
+- 出报：`pipeline.runDailyReport({windowType})`：`recomputeAll(窗口)` → `getEligible(窗口起点)`（三平台 + 账号池 + confirmed + 双 1000）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。0 达标则用 `fallbackReportData` 跳过 AI。
 - 自动：`scheduler.startScheduler()`，setTimeout 到点跑；用 `meta.last_auto_run_date` 防重复；可补跑。设置变更后调 `restartScheduler()`。
 
 ## Token 策略（既省又准）

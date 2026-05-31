@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b0f1a" />
   <title>爆款选题雷达 Local</title>
   <link rel="stylesheet" href="styles.css" />
   <script>
@@ -31,16 +32,23 @@
       <div class="panel">
         <h3>生成每日爆款选题日报</h3>
         <div class="row">
-          <label>时间窗口
-            <select id="ovWindow">
-              <option value="last_3_days">最近 3 天</option>
-              <option value="last_7_days">最近 7 天</option>
-            </select>
+          <label>回溯天数
+            <input id="ovDays" type="number" min="1" max="30" value="1" style="width:70px" />
+          </label>
+          <label class="check" style="font-size:13px; margin-left:12px;">
+            <input type="checkbox" id="ovAutoCollect" checked /> 先自动采集（RPA）
           </label>
           <button class="primary" id="ovGenerate">立即生成日报</button>
           <span class="muted" id="ovGenMsg"></span>
         </div>
+        <div id="ovProgress" style="display:none; margin-top:10px; padding:10px; background:var(--bg2); border-radius:6px; font-size:13px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="spinner" style="width:16px;height:16px;border:2px solid var(--brand);border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;display:inline-block;"></span>
+            <span id="ovProgressText">准备中...</span>
+          </div>
+        </div>
         <p class="muted">入选条件（硬阈值，由系统确定性判定）：来自账号池的抖音 / 小红书 / 视频号内容，点赞 ≥ 1000 <b>且</b> 转发/分享 ≥ 1000，且已人工确认。</p>
+        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，系统会在生成日报前自动打开浏览器访问每个账号主页，提取最新内容数据并截图存档。</p>
       </div>
     </section>
 
@@ -49,6 +57,20 @@
       <div class="panel">
         <h3>今日候选池 <span class="muted">— 待你确认/补录指标的内容</span></h3>
         <p class="muted">只有关联到账号池并「确认」后、且点赞与转发均 ≥ 1000 的三平台内容，才会进入正式日报。缺转发数的内容停留在「待补录」，不会被自动算作达标。</p>
+        <div class="row" style="margin-bottom: 15px; background: rgba(var(--brand-rgb), 0.05); padding: 10px; border-radius: 6px;">
+          <div style="flex: 1;">
+            <b style="color: var(--brand);">✨ 自动巡检 (RPA)</b>
+            <div class="muted" style="font-size: 13px; margin-top: 4px;">自动打开专属浏览器，静默抓取账号池中所有开启了巡检的最新内容。</div>
+          </div>
+          <button class="primary" id="candRunRpa" style="align-self: center;">一键自动巡检</button>
+        </div>
+        <div class="row" id="candToolbar" style="margin-bottom:10px;display:none">
+          <label class="check" style="font-size:13px"><input type="checkbox" id="candSelectAll" /> 全选</label>
+          <span class="muted" id="candSelectedCount"></span>
+          <button class="primary" id="candBatchConfirm">批量确认</button>
+          <button id="candBatchArchive">批量归档</button>
+          <span class="muted" style="margin-left:auto">快捷键：Enter=确认当前 │ ↑↓=切换 │ Esc=取消选中</span>
+        </div>
         <div id="candList" class="list"></div>
       </div>
     </section>
@@ -63,6 +85,7 @@
             <option value="">全部状态</option>
             <option value="confirmed">已确认</option>
             <option value="needs_review">待复核</option>
+            <option value="monitoring">发酵中</option>
             <option value="missing_share">缺转发数</option>
             <option value="missing_like">缺点赞数</option>
             <option value="below_threshold">未达阈值</option>
@@ -88,15 +111,16 @@
       <div class="panel">
         <h3>账号池 <span class="muted">— 你关注的商业博主</span></h3>
         <div class="row">
-          <input id="acNick" placeholder="昵称" />
+          <input id="acNick" placeholder="昵称" style="flex: 1; min-width: 120px;" />
+          <button id="acAiFill" title="根据昵称自动用 AI 补齐其他信息">AI 补齐</button>
           <select id="acPlatform">
             <option value="douyin">抖音</option>
             <option value="xiaohongshu">小红书</option>
             <option value="wechat_channels">视频号</option>
             <option value="other">其他</option>
           </select>
-          <input id="acUrl" placeholder="主页链接" />
-          <input id="acCategory" placeholder="分类(商业/AI/创业…)" />
+          <input id="acUrl" placeholder="主页链接" style="flex: 2; min-width: 180px;" />
+          <input id="acCategory" placeholder="分类(商业/AI/创业…)" style="flex: 1; min-width: 100px;" />
           <select id="acPriority"><option>S</option><option>A</option><option selected>B</option></select>
           <button class="primary" id="acAdd">添加</button>
         </div>
@@ -104,6 +128,34 @@
           <label class="filebtn">导入 CSV<input type="file" id="acCsv" accept=".csv" hidden /></label>
           <span class="muted">表头：platform,nickname,homepage_url,category,priority,monitor_enabled</span>
         </div>
+        <div class="manual-import">
+          <h3>手动多行导入 <span class="muted">— 可以反复粘贴、反复导入，重复账号会更新</span></h3>
+          <textarea id="acManualText" rows="5" placeholder="一行一个账号：平台,昵称,主页链接,分类,优先级,是否巡检&#10;抖音,商业老王,https://www.douyin.com/user/xxx,商业,S,true&#10;小红书,增长小李,https://www.xiaohongshu.com/user/profile/xxx,营销,A,true"></textarea>
+          <div class="row">
+            <button class="primary" id="acManualImport">导入多行</button>
+            <button id="acManualClear">清空</button>
+            <span class="muted" id="acManualMsg"></span>
+          </div>
+        </div>
+
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--line);" />
+
+        <h3>AI 智能检索与预测 <span class="muted">— 输入博主名称，智能生成对应平台的博主账号以供导入</span></h3>
+        <div class="row">
+          <input id="acAiQuery" placeholder="输入博主名字或关键词（例如：商业老王 或 科技趋势博主）" style="flex: 1; min-width: 250px;" />
+          <button class="primary" id="acAiSearch">AI 检索</button>
+          <span class="muted" id="acAiSearchMsg"></span>
+        </div>
+        <div id="acAiResults" class="panel" style="margin-top: 12px; display: none; border-color: var(--brand);">
+          <h4 style="margin: 0 0 10px;">检索建议（勾选要导入的账号）：</h4>
+          <div id="acAiResultsTable"></div>
+          <div class="row" style="margin-top: 12px; justify-content: flex-end;">
+            <button class="primary" id="acAiImportSelected">导入选中账号</button>
+          </div>
+        </div>
+
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--line);" />
+
         <div id="acTable"></div>
       </div>
     </section>
@@ -113,10 +165,7 @@
       <div class="panel">
         <h3>日报</h3>
         <div class="row">
-          <select id="rpWindow">
-            <option value="last_3_days">最近 3 天</option>
-            <option value="last_7_days">最近 7 天</option>
-          </select>
+          <input id="rpDays" type="number" min="1" max="30" value="1" style="width:70px" placeholder="天数" />
           <button class="primary" id="rpGenerate">生成日报</button>
           <span class="muted" id="rpMsg"></span>
         </div>
@@ -128,36 +177,51 @@
     <section id="tab-settings" class="tab hidden">
       <div class="panel">
         <h3>AI API Key（BYOK）</h3>
-        <div class="grid2">
-          <label>供应商
-            <select id="stProvider">
-              <option value="openai">OpenAI</option>
-              <option value="openai-compatible">OpenAI 兼容接口</option>
-              <option value="anthropic">Anthropic</option>
-            </select>
-          </label>
-          <label>模型名（分析）<input id="stModel" placeholder="如 gpt-4o-mini / claude-haiku-4-5" /></label>
-          <label>日报模型（可留空=同上，建议用更强模型）<input id="stReportModel" placeholder="如 gpt-4o / claude-sonnet-4-6" /></label>
-          <label>Base URL（可选/兼容接口或代理）<input id="stBaseUrl" placeholder="留空用默认" /></label>
-        </div>
         <div class="row">
-          <input id="stApiKey" type="password" placeholder="粘贴 API Key（加密存储，不外传）" />
-          <button class="primary" id="stSaveKey">保存 Key</button>
-          <button id="stTestKey">测试调用</button>
-          <button class="danger" id="stClearKey">清除 Key</button>
+          <input id="stApiKey" type="password" placeholder="粘贴主 API Key（加密存储，不外传）" style="flex:1" />
+          <button class="primary" id="stSaveKey">保存</button>
+          <button id="stTestKey">测试</button>
+          <button class="danger" id="stClearKey">清除</button>
           <span class="muted" id="stKeyState"></span>
         </div>
+        <div class="row">
+          <input id="stApiKey2" type="password" placeholder="粘贴备用 API Key（可选，主 Key 失败时自动切换）" style="flex:1" />
+          <button class="primary" id="stSaveKey2">保存</button>
+          <button class="danger" id="stClearKey2">清除</button>
+          <span class="muted" id="stKeyState2"></span>
+        </div>
+        <div class="row">
+          <label style="flex:1">供应商
+            <select id="stVendor">
+              <option value="openai">OpenAI（官方）</option>
+              <option value="deepseek">DeepSeek 深度求索</option>
+              <option value="xiaomi">小米 MiMo</option>
+              <option value="moonshot">月之暗面 Kimi</option>
+              <option value="zhipu">智谱 GLM</option>
+              <option value="qwen">通义千问（阿里百炼）</option>
+              <option value="siliconflow">硅基流动 SiliconFlow</option>
+              <option value="anthropic">Anthropic Claude</option>
+              <option value="custom">自定义（手动填地址）</option>
+            </select>
+          </label>
+          <label style="flex:1">模型名
+            <input id="stModel" list="modelHints" placeholder="选择供应商后会给出示例" />
+            <datalist id="modelHints"></datalist>
+          </label>
+        </div>
+        <div class="row">
+          <label style="flex:1">接口地址 Base URL
+            <input id="stBaseUrl" placeholder="选择供应商后自动填入；自定义可手填" />
+          </label>
+        </div>
+        <p class="muted" id="stVendorHint">选择上面的供应商，会自动填好接口地址，你只需粘贴对应平台的 Key 并填模型名。</p>
+        <p class="muted" id="stTestDetail"></p>
 
         <h3>自动运行（接入 Key 后每天自动产出日报）</h3>
         <div class="grid2">
           <label class="check"><input type="checkbox" id="stSchedEnabled" /> 开启每日自动生成</label>
           <label>每日时间<input id="stSchedTime" type="time" value="09:00" /></label>
-          <label>默认窗口
-            <select id="stSchedWindow">
-              <option value="last_3_days">最近 3 天</option>
-              <option value="last_7_days">最近 7 天</option>
-            </select>
-          </label>
+          <label>默认回溯天数<input id="stSchedDays" type="number" min="1" max="30" value="1" /></label>
           <label>每日 token 预算提醒（0=不限）<input id="stBudget" type="number" min="0" value="0" /></label>
         </div>
         <div class="row"><button class="primary" id="stSaveSettings">保存设置</button><span class="muted" id="stSaveMsg"></span></div>

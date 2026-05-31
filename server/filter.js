@@ -27,6 +27,17 @@ export function computeDataStatus(c) {
   if (c.is_duplicate === 1 || c.is_duplicate === true) return 'duplicate';
   if (c.archived === 1 || c.archived === true) return 'archived';
 
+  // 新增规则：24小时内的新内容标记为 monitoring，等待发酵
+  if (c.publish_time) {
+    const pubTime = new Date(c.publish_time).getTime();
+    if (!Number.isNaN(pubTime)) {
+      const ageHours = (Date.now() - pubTime) / (1000 * 60 * 60);
+      if (ageHours < 24 && c.user_confirmed !== 1 && c.user_confirmed !== true) {
+        return 'monitoring';
+      }
+    }
+  }
+
   const trusted =
     c.user_confirmed === 1 || c.user_confirmed === true || isTrustedSource(c.metrics_source);
   // 自动识别的数据在用户确认前一律视为需人工复核，绝不自动当作达标。
@@ -47,12 +58,32 @@ export function computeDataStatus(c) {
 }
 
 /**
+ * 从 'last_N_day(s)' 解析出天数。解析不出则按 1 天兜底。
+ * 单复数都接受（last_1_day / last_1_days / last_20_days）。
+ */
+export function windowDays(windowType) {
+  const m = String(windowType).match(/^last_(\d+)_days?$/);
+  const days = m ? Number(m[1]) : 1;
+  return days >= 1 ? days : 1;
+}
+
+/** 规范化窗口字符串：任意输入 → 'last_N_days'（统一复数，避免单复数两套格式不一致）。 */
+export function normalizeWindowType(windowType) {
+  return `last_${windowDays(windowType)}_days`;
+}
+
+/** 窗口的中文标签：动态生成「最近 N 天」，支持任意天数（不再依赖硬编码表）。 */
+export function windowLabel(windowType) {
+  return `最近 ${windowDays(windowType)} 天`;
+}
+
+/**
  * 滚动时间窗口的起点（ISO 字符串，UTC）。
- * @param {'last_3_days'|'last_7_days'} windowType
+ * 支持任意天数：'last_N_days' 格式（如 last_1_day、last_5_days、last_14_days）。
+ * @param {string} windowType  形如 'last_N_day(s)'
  */
 export function windowStartISO(windowType, now = new Date()) {
-  const days = windowType === 'last_7_days' ? 7 : 3;
-  const ms = days * 24 * 3600 * 1000;
+  const ms = windowDays(windowType) * 24 * 3600 * 1000;
   return new Date(now.getTime() - ms).toISOString();
 }
 

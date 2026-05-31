@@ -12,6 +12,7 @@ export const DATA_DIR = process.env.VB_DATA_DIR
 
 export const SCREENSHOTS_DIR = join(DATA_DIR, 'screenshots');
 export const EXPORTS_DIR = join(DATA_DIR, 'exports');
+export const CHROME_PROFILE_DIR = join(DATA_DIR, 'chrome-profile');
 export const DB_PATH = join(DATA_DIR, 'viral-brief.db');
 export const CONFIG_PATH = join(DATA_DIR, 'config.json');
 export const KEYFILE_PATH = join(DATA_DIR, '.keyfile');
@@ -19,7 +20,7 @@ export const WEB_DIR = join(PROJECT_ROOT, 'web');
 
 /** 确保所有运行时目录存在（幂等）。 */
 export function ensureDirs() {
-  for (const d of [DATA_DIR, SCREENSHOTS_DIR, EXPORTS_DIR]) {
+  for (const d of [DATA_DIR, SCREENSHOTS_DIR, EXPORTS_DIR, CHROME_PROFILE_DIR]) {
     mkdirSync(d, { recursive: true });
   }
 }

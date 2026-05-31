@@ -6,10 +6,12 @@
  *   绝不使用 AI 文本里的数字。AI 只提供母题、原因、改写标题等定性内容。
  */
 
-const WINDOW_LABEL = { last_3_days: '最近 3 天', last_7_days: '最近 7 天' };
+import { windowLabel } from '../filter.js';
+
 const STATUS_LABEL = {
   needs_review: '待复核', missing_share: '缺转发数', missing_like: '缺点赞数',
   below_threshold: '未达阈值', duplicate: '重复', archived: '已归档', confirmed: '已确认',
+  monitoring: '发酵中',
 };
 
 const fmt = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US'));
@@ -54,7 +56,7 @@ function excludedSummary(counts) {
 export function fallbackReportData(windowType, counts) {
   const ex = excludedSummary(counts);
   return {
-    daily_summary: `过去${WINDOW_LABEL[windowType] || windowType}内，暂无同时满足「点赞≥1000 且 转发/分享≥1000」且已人工确认的内容，样本不足。${ex ? `当前库内：${ex}。建议在「今日候选」里补录/确认指标后再生成。` : ''}`,
+    daily_summary: `过去${windowLabel(windowType)}内，暂无同时满足「点赞≥1000 且 转发/分享≥1000」且已人工确认的内容，样本不足。${ex ? `当前库内：${ex}。建议在「今日候选」里补录/确认指标后再生成。` : ''}`,
     top_topic_clusters: [],
     recommended_actions: [],
     data_warnings: ['样本不足：达标内容为 0 条，本期不做趋势结论。'],
@@ -64,21 +66,23 @@ export function fallbackReportData(windowType, counts) {
 // ---------------------------------------------------------------- Markdown ----
 
 export function renderMarkdown(reportData, items, analyses, meta) {
-  const L = WINDOW_LABEL[meta.windowType] || meta.windowType;
+  const L = windowLabel(meta.windowType);
   const out = [];
   out.push(`# 每日爆款选题总结 — ${L}`);
   out.push('');
   out.push(`> 生成时间：${meta.generatedAt}　｜　窗口：${L}　｜　达标内容：**${items.length}** 条　｜　入选条件：账号池三平台 + 点赞 ≥ 1000 且 转发/分享 ≥ 1000`);
   out.push('');
 
-  out.push('## 一、今日核心判断');
+  out.push('## 一、AI 观察摘要');
   out.push('');
   out.push(reportData.daily_summary || '（无）');
+  out.push('');
+  out.push('> ⚠️ 以上内容由 AI 基于下方达标清单自动生成，仅供参考，不代表事实判断。');
   out.push('');
 
   const clusters = reportData.top_topic_clusters || [];
   if (clusters.length) {
-    out.push(`## 二、爆款母题 TOP ${clusters.length}`);
+    out.push(`## 二、AI 母题聚类 TOP ${clusters.length}（仅供参考）`);
     out.push('');
     clusters.forEach((c, i) => {
       out.push(`### ${i + 1}. ${c.cluster_name || '（未命名母题）'}`);
@@ -92,7 +96,7 @@ export function renderMarkdown(reportData, items, analyses, meta) {
         }
       }
       if ((c.rewrite_titles || []).length) {
-        out.push('- **可复用标题**：');
+        out.push('- **AI 建议标题**（仅供参考）：');
         for (const t of c.rewrite_titles) out.push(`  - ${t}`);
       }
       out.push('');
@@ -117,7 +121,7 @@ export function renderMarkdown(reportData, items, analyses, meta) {
 
   const titles = gatherReusableTitles(reportData, analyses);
   if (titles.length) {
-    out.push('## 四、可复用选题');
+    out.push('## 四、AI 建议选题（仅供参考）');
     out.push('');
     titles.forEach((t, i) => out.push(`${i + 1}. ${t}`));
     out.push('');
@@ -125,7 +129,7 @@ export function renderMarkdown(reportData, items, analyses, meta) {
 
   const actions = reportData.recommended_actions || [];
   if (actions.length) {
-    out.push('## 五、商业承接建议');
+    out.push('## 五、AI 商业承接建议（仅供参考）');
     out.push('');
     for (const a of actions) out.push(`- ${a}`);
     out.push('');
@@ -137,6 +141,9 @@ export function renderMarkdown(reportData, items, analyses, meta) {
   const ex = excludedSummary(meta.counts || {});
   if (ex) out.push(`- **本期未入选统计**：${ex}（这些内容因缺数据或未达标，未计入正式榜单）。`);
   out.push(`- **样本量**：达标 ${items.length} 条。`);
+  if (items.length <= 2) {
+    out.push('- ⚠️ **少样本提示**：本期达标内容仅 ' + items.length + ' 条，AI 分析结论参考价值有限，请结合更长窗口数据综合判断。');
+  }
   for (const w of reportData.data_warnings || []) out.push(`- ${w}`);
   out.push('');
   out.push('---');
@@ -147,7 +154,7 @@ export function renderMarkdown(reportData, items, analyses, meta) {
 // -------------------------------------------------------------------- HTML ----
 
 export function renderHtml(reportData, items, analyses, meta) {
-  const L = WINDOW_LABEL[meta.windowType] || meta.windowType;
+  const L = windowLabel(meta.windowType);
   const clusters = reportData.top_topic_clusters || [];
   const titles = gatherReusableTitles(reportData, analyses);
   const actions = reportData.recommended_actions || [];
@@ -164,7 +171,7 @@ export function renderHtml(reportData, items, analyses, meta) {
       <h3>${i + 1}. ${esc(c.cluster_name || '（未命名母题）')}</h3>
       ${c.why_it_spread ? `<p><b>为什么传播：</b>${esc(c.why_it_spread)}</p>` : ''}
       ${repLi ? `<p><b>代表内容：</b></p><ul>${repLi}</ul>` : ''}
-      ${titleLi ? `<p><b>可复用标题：</b></p><ul>${titleLi}</ul>` : ''}
+      ${titleLi ? `<p><b>AI 建议标题（仅供参考）：</b></p><ul>${titleLi}</ul>` : ''}
     </div>`;
   }).join('');
 
@@ -210,23 +217,25 @@ export function renderHtml(reportData, items, analyses, meta) {
   <div class="meta">生成时间：${esc(meta.generatedAt)}　｜　达标内容：<b>${items.length}</b> 条　｜　入选条件：账号池三平台 + 点赞 ≥ 1000 且 转发/分享 ≥ 1000</div>
   <p class="noprint muted">提示：按 Cmd/Ctrl + P 可「打印为 PDF」。</p>
 
-  <h2>一、今日核心判断</h2>
+  <h2>一、AI 观察摘要</h2>
   <p>${esc(reportData.daily_summary || '（无）')}</p>
+  <p class="muted">⚠️ 以上内容由 AI 基于下方达标清单自动生成，仅供参考，不代表事实判断。</p>
 
-  ${clusters.length ? `<h2>二、爆款母题 TOP ${clusters.length}</h2>${clusterHtml}` : ''}
+  ${clusters.length ? `<h2>二、AI 母题聚类 TOP ${clusters.length}（仅供参考）</h2>${clusterHtml}` : ''}
 
   <h2>三、达标内容清单 <span class="muted">（数据来自本地库，为精确值）</span></h2>
   ${items.length ? `<table><thead><tr><th>#</th><th>平台</th><th>作者</th><th>标题</th><th>点赞</th><th>转发/分享</th><th>评论</th><th>发布</th><th>链接</th></tr></thead><tbody>${rows}</tbody></table>` : '<p><i>本期无达标内容。</i></p>'}
 
-  ${titles.length ? `<h2>四、可复用选题</h2><ol>${titles.map((t) => `<li>${esc(t)}</li>`).join('')}</ol>` : ''}
+  ${titles.length ? `<h2>四、AI 建议选题（仅供参考）</h2><ol>${titles.map((t) => `<li>${esc(t)}</li>`).join('')}</ol>` : ''}
 
-  ${actions.length ? `<h2>五、商业承接建议</h2><ul>${actions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}
+  ${actions.length ? `<h2>五、AI 商业承接建议（仅供参考）</h2><ul>${actions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}
 
   <h2>六、数据备注</h2>
   <ul class="notes">
     <li><b>数据口径：</b>点赞/转发等数字来自插件采集 + 人工确认；不同平台口径不一，已按公开可见值处理。</li>
     ${ex ? `<li><b>本期未入选统计：</b>${esc(ex)}（缺数据或未达标，不计入榜单）。</li>` : ''}
     <li><b>样本量：</b>达标 ${items.length} 条。</li>
+    ${items.length <= 2 ? `<li>⚠️ <b>少样本提示：</b>本期达标内容仅 ${items.length} 条，AI 分析结论参考价值有限，请结合更长窗口数据综合判断。</li>` : ''}
     ${(reportData.data_warnings || []).map((w) => `<li>${esc(w)}</li>`).join('')}
   </ul>
 

@@ -7,7 +7,7 @@
  *  - 准（宁可多花）：返回的 JSON 强制校验，失败就带着「上次哪里错了」重试，
  *    直到拿到合法结构为止——绝不把脏数据吞下去。
  */
-import { loadConfig, getApiKey, effectiveBaseUrl } from '../config.js';
+import { loadConfig, getApiKey, getApiKey2, effectiveBaseUrl } from '../config.js';
 import { addUsage } from '../store.js';
 import { log } from '../lib/log.js';
 
@@ -38,9 +38,19 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 }
 
 /** 真正打一次模型，返回 { text, usage }。usage 统一为 {input, output, cached}。 */
-async function callRaw({ system, user, model, temperature, maxTokens, key, cfg }) {
-  const base = effectiveBaseUrl();
-  const provider = cfg.provider;
+function baseUrlForProvider(provider, cfg, providerOverride) {
+  // 备用 Key 可能属于另一家供应商。跨供应商 fallback 时不能沿用主 Key 的
+  // baseUrl，否则会出现「主 Key 401 后，备用 Anthropic Key 被发到 DeepSeek」
+  // 这类偶发失败。
+  if (!providerOverride || providerOverride === cfg.provider) return effectiveBaseUrl();
+  if (provider === 'anthropic') return 'https://api.anthropic.com';
+  if (provider === 'openai') return 'https://api.openai.com/v1';
+  return (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
+}
+
+async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, providerOverride }) {
+  const provider = providerOverride || cfg.provider;
+  const base = baseUrlForProvider(provider, cfg, providerOverride);
 
   if (provider === 'anthropic') {
     const url = `${base}/v1/messages`;
@@ -138,6 +148,23 @@ async function callRawWithNetworkRetry(args, retries) {
  * @param {string} [o.task] 用量归类
  * @param {(json:any)=>(string|null)} [o.validate] 返回 null 表示通过，返回字符串表示错误原因
  */
+const isAuthError = (msg) => / 401| 403/.test(String(msg));
+
+/** 把底层错误转成对用户可读、可行动的提示。 */
+export function friendlyError(e) {
+  const m = String(e?.message || e);
+  if (isAuthError(m)) {
+    return new AIError('API Key 无效或认证失败（401/403）。请到「设置」检查并重新保存 Key，再点「测试调用」。');
+  }
+  if (/AbortError|aborted|timeout/i.test(m)) {
+    return new AIError('AI 请求超时。请检查网络或代理，或在「设置」调大超时时间后重试。');
+  }
+  if (/ 429/.test(m)) {
+    return new AIError('AI 接口限流（429）。请稍后重试，或更换额度充足的 Key。');
+  }
+  return e instanceof AIError ? e : new AIError(m);
+}
+
 export async function callJSON({ system, user, model, temperature, maxTokens, task = 'ai', validate }) {
   const cfg = loadConfig();
   const key = getApiKey();
@@ -150,10 +177,21 @@ export async function callJSON({ system, user, model, temperature, maxTokens, ta
 
   for (let attempt = 0; attempt <= jsonRetries; attempt++) {
     const userMsg = extra ? `${user}\n\n${extra}` : user;
-    const raw = await callRawWithNetworkRetry({
-      system, user: userMsg, model: useModel,
-      temperature: temperature ?? cfg.temperature, maxTokens, key, cfg,
-    }, cfg.retries ?? 2);
+    let raw;
+    try {
+      raw = await callRawWithNetworkRetry({
+        system, user: userMsg, model: useModel,
+        temperature: temperature ?? cfg.temperature, maxTokens, key, cfg,
+      }, cfg.retries ?? 2);
+    } catch (netErr) {
+      // 网络/鉴权类错误：先尝试备用 Key，再决定是否抛出。
+      lastErr = netErr;
+      if (isAuthError(netErr.message)) {
+        const viaBackup = await tryBackupKey({ system, user, model: useModel, temperature, maxTokens, task, validate, cfg });
+        if (viaBackup) return viaBackup;
+      }
+      throw friendlyError(netErr);
+    }
 
     // 用量始终记账（即便这次 JSON 不合法，token 也确实花了）
     addUsage({ task, model: useModel, input: raw.usage.input, output: raw.usage.output, cached: raw.usage.cached });
@@ -176,11 +214,40 @@ export async function callJSON({ system, user, model, temperature, maxTokens, ta
       log.warn(`[${task}] JSON 解析失败，重试 ${attempt + 1}/${jsonRetries}`);
     }
   }
-  throw lastErr || new AIError('AI 调用失败');
+  throw friendlyError(lastErr || new AIError('AI 调用失败'));
+}
+
+/** 主 Key 鉴权失败时用备用 Key 重试一次。成功返回结果对象，否则返回 null。 */
+async function tryBackupKey({ system, user, model, temperature, maxTokens, task, validate, cfg }) {
+  const backupKey = getApiKey2();
+  if (!backupKey) return null;
+  log.info('[备用Key] 主 Key 鉴权失败，尝试备用 Key…');
+  const base = (cfg.baseUrl || '').toLowerCase();
+  const backupProvider = backupKey.startsWith('sk-ant-') ? 'anthropic'
+    : (base && !base.includes('openai.com')) ? 'openai-compatible' : 'openai';
+  try {
+    const raw = await callRawWithNetworkRetry({
+      system, user, model,
+      temperature: temperature ?? cfg.temperature, maxTokens, key: backupKey, cfg,
+      providerOverride: backupProvider,
+    }, cfg.retries ?? 2);
+    addUsage({ task, model, input: raw.usage.input, output: raw.usage.output, cached: raw.usage.cached });
+    const json = extractJson(raw.text);
+    if (validate) {
+      const err = validate(json);
+      if (err) throw new AIError(`备用 Key 校验未通过：${err}`);
+    }
+    log.info('[备用Key] 成功。');
+    return { json, usage: raw.usage, model };
+  } catch (e2) {
+    log.warn(`[备用Key] 也失败了：${e2.message}`);
+    return null;
+  }
 }
 
 /** 配置页的「测试调用」用：用最小代价验证 Key/模型可用。 */
 export async function testConnection() {
+  const cfg = loadConfig();
   const { json, model, usage } = await callJSON({
     system: '你是一个连通性测试器。无论收到什么，只返回 {"ok": true}。',
     user: '请只返回 {"ok": true}',
@@ -188,5 +255,5 @@ export async function testConnection() {
     maxTokens: 50,
     validate: (j) => (j && j.ok === true ? null : '未返回 {"ok":true}'),
   });
-  return { ok: true, model, usage };
+  return { ok: true, model, usage, provider: cfg.provider, baseUrl: effectiveBaseUrl() };
 }

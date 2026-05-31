@@ -11,6 +11,8 @@
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
     "report": "node --disable-warning=ExperimentalWarning scripts/run-report.js",
+    "patrol": "node --disable-warning=ExperimentalWarning server/rpa/patrol.js",
+    "rpa:chrome": "mkdir -p data/chrome-profile && '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --user-data-dir=\"$(pwd)/data/chrome-profile\" --remote-debugging-port=9222",
     "package:mac": "node scripts/package-macos-app.js"
   },
   "keywords": [

@@ -293,22 +293,45 @@ export function listAccounts() {
   return all('SELECT * FROM accounts ORDER BY priority ASC, created_at DESC');
 }
 
+function normalizePlatformInput(v) {
+  const s = String(v || '').trim().toLowerCase();
+  if (['douyin', '抖音', 'dy'].includes(s)) return 'douyin';
+  if (['xiaohongshu', '小红书', 'xhs', 'red'].includes(s)) return 'xiaohongshu';
+  if (['wechat_channels', '视频号', '微信视频号', 'channels'].includes(s)) return 'wechat_channels';
+  if (['wechat_article', '公众号', '公众号文章'].includes(s)) return 'wechat_article';
+  return s || 'other';
+}
+
+function normalizePriority(v) {
+  const s = String(v || 'B').trim().toUpperCase();
+  return ['S', 'A', 'B'].includes(s) ? s : 'B';
+}
+
 export function upsertAccount(a) {
-  const id = a.id || randomUUID();
-  const existing = get('SELECT id FROM accounts WHERE id = ?', [id]);
+  const platform = normalizePlatformInput(a.platform);
+  const nickname = String(a.nickname || '').trim();
+  const id = cleanId(a.id);
+  const existing = id
+    ? get('SELECT id FROM accounts WHERE id = ?', [id])
+    : get('SELECT id FROM accounts WHERE lower(trim(platform)) = ? AND lower(trim(nickname)) = ? LIMIT 1', [platform, nickname.toLowerCase()]);
+  const accountId = existing?.id || id || randomUUID();
+  const homepage = String(a.homepage_url || '').trim();
+  const category = String(a.category || '').trim();
+  const priority = normalizePriority(a.priority);
+  const enabled = a.monitor_enabled ? 1 : 0;
   if (existing) {
     run(
       `UPDATE accounts SET platform=?, nickname=?, homepage_url=?, category=?, priority=?, monitor_enabled=? WHERE id=?`,
-      [a.platform, a.nickname, a.homepage_url, a.category, a.priority, a.monitor_enabled ? 1 : 0, id],
+      [platform, nickname, homepage, category, priority, enabled, accountId],
     );
   } else {
     run(
       `INSERT INTO accounts (id, platform, nickname, homepage_url, category, priority, monitor_enabled, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, a.platform, a.nickname, a.homepage_url, a.category, a.priority || 'B', a.monitor_enabled ? 1 : 0, nowISO()],
+      [accountId, platform, nickname, homepage, category, priority, enabled, nowISO()],
     );
   }
-  return get('SELECT * FROM accounts WHERE id = ?', [id]);
+  return get('SELECT * FROM accounts WHERE id = ?', [accountId]);
 }
 
 export function deleteAccount(id) {
@@ -338,6 +361,35 @@ export function importAccountsCsv(text) {
     imported++;
   }
   return { imported };
+}
+
+/** 手动多行导入：一行一个账号，格式：平台,昵称,主页链接,分类,优先级,是否巡检。 */
+export function importAccountsLines(text) {
+  const rows = parseCsv(String(text || '').replace(/\t/g, ','));
+  let imported = 0;
+  let skipped = 0;
+  const errors = [];
+  for (let i = 0; i < rows.length; i++) {
+    const cells = rows[i].map((c) => c.trim());
+    if (cells.length === 1 && cells[0] === '') { skipped++; continue; }
+    if (i === 0 && ['platform', '平台'].includes(cells[0]?.toLowerCase())) continue;
+    const [platform, nickname, homepage_url = '', category = '商业', priority = 'B', monitorRaw = 'true'] = cells;
+    if (!platform || !nickname) {
+      skipped++;
+      errors.push(`第 ${i + 1} 行缺少平台或昵称`);
+      continue;
+    }
+    upsertAccount({
+      platform,
+      nickname,
+      homepage_url,
+      category,
+      priority,
+      monitor_enabled: !/^(0|false|no|否)$/i.test(monitorRaw || ''),
+    });
+    imported++;
+  }
+  return { imported, skipped, errors };
 }
 
 function parseCsv(text) {
@@ -418,20 +470,27 @@ export function upsertAnalysis(contentId, data, model) {
 export function insertReport(r) {
   const id = r.id || randomUUID();
   run(
-    `INSERT INTO daily_reports (id, report_date, window_type, eligible_count, report_json, report_markdown, export_md_path, export_html_path, export_csv_path, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO daily_reports (id, report_date, window_type, eligible_count, report_json, report_markdown, export_md_path, export_html_path, export_csv_path, export_zip_path, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, r.report_date, r.window_type, r.eligible_count, r.report_json, r.report_markdown,
-      r.export_md_path, r.export_html_path, r.export_csv_path, nowISO()],
+      r.export_md_path, r.export_html_path, r.export_csv_path, r.export_zip_path, nowISO()],
   );
   return getReport(id);
 }
 
 export function listReports(limit = 60) {
-  return all('SELECT id, report_date, window_type, eligible_count, export_md_path, export_html_path, export_csv_path, created_at FROM daily_reports ORDER BY created_at DESC LIMIT ?', [limit]);
+  return all('SELECT id, report_date, window_type, eligible_count, export_md_path, export_html_path, export_csv_path, export_zip_path, created_at FROM daily_reports ORDER BY created_at DESC LIMIT ?', [limit]);
 }
 
 export function getReport(id) {
   return get('SELECT * FROM daily_reports WHERE id = ?', [id]);
+}
+
+export function deleteReport(id) {
+  const r = getReport(id);
+  if (!r) return null;
+  run('DELETE FROM daily_reports WHERE id = ?', [id]);
+  return r;
 }
 
 // ----------------------------------------------------------------------------
