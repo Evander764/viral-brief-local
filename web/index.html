@@ -59,8 +59,8 @@
         <p class="muted">只有关联到账号池并「确认」后、且点赞与转发均 ≥ 1000 的三平台内容，才会进入正式日报。缺转发数的内容停留在「待补录」，不会被自动算作达标。</p>
         <div class="row" style="margin-bottom: 15px; background: rgba(var(--brand-rgb), 0.05); padding: 10px; border-radius: 6px;">
           <div style="flex: 1;">
-            <b style="color: var(--brand);">✨ 自动巡检 (RPA)</b>
-            <div class="muted" style="font-size: 13px; margin-top: 4px;">自动打开专属浏览器，静默抓取账号池中所有开启了巡检的最新内容。</div>
+            <b style="color: var(--brand);">自动巡检 (RPA)</b>
+            <div class="muted" style="font-size: 13px; margin-top: 4px;">使用你已登录的 Chrome 资料目录抓取账号池中开启巡检的最新内容；若 Chrome 正在普通模式运行，请先退出后再巡检。</div>
           </div>
           <button class="primary" id="candRunRpa" style="align-self: center;">一键自动巡检</button>
         </div>
@@ -109,53 +109,64 @@
     <!-- 账号池 -->
     <section id="tab-accounts" class="tab hidden">
       <div class="panel">
-        <h3>账号池 <span class="muted">— 你关注的商业博主</span></h3>
-        <div class="row">
-          <input id="acNick" placeholder="昵称" style="flex: 1; min-width: 120px;" />
-          <button id="acAiFill" title="根据昵称自动用 AI 补齐其他信息">AI 补齐</button>
-          <select id="acPlatform">
-            <option value="douyin">抖音</option>
-            <option value="xiaohongshu">小红书</option>
-            <option value="wechat_channels">视频号</option>
-            <option value="other">其他</option>
-          </select>
-          <input id="acUrl" placeholder="主页链接" style="flex: 2; min-width: 180px;" />
-          <input id="acCategory" placeholder="分类(商业/AI/创业…)" style="flex: 1; min-width: 100px;" />
-          <select id="acPriority"><option>S</option><option>A</option><option selected>B</option></select>
-          <button class="primary" id="acAdd">添加</button>
-        </div>
-        <div class="row">
-          <label class="filebtn">导入 CSV<input type="file" id="acCsv" accept=".csv" hidden /></label>
-          <span class="muted">表头：platform,nickname,homepage_url,category,priority,monitor_enabled</span>
-        </div>
-        <div class="manual-import">
-          <h3>手动多行导入 <span class="muted">— 可以反复粘贴、反复导入，重复账号会更新</span></h3>
-          <textarea id="acManualText" rows="5" placeholder="一行一个账号：平台,昵称,主页链接,分类,优先级,是否巡检&#10;抖音,商业老王,https://www.douyin.com/user/xxx,商业,S,true&#10;小红书,增长小李,https://www.xiaohongshu.com/user/profile/xxx,营销,A,true"></textarea>
-          <div class="row">
-            <button class="primary" id="acManualImport">导入多行</button>
-            <button id="acManualClear">清空</button>
-            <span class="muted" id="acManualMsg"></span>
+        <h3>账号池 <span class="muted">— 你关注的商业博主（抖音 / 小红书 / 视频号）</span></h3>
+        <div class="ac-add">
+          <!-- 方式一：手动填写 —— 固定字段逐项填，不用自己排格式 -->
+          <div class="ac-card">
+            <h4>✍️ 手动填写 <span class="muted">已知道信息，逐项填</span></h4>
+            <div class="ac-grid">
+              <label>平台
+                <select id="acPlatform">
+                  <option value="douyin">抖音</option>
+                  <option value="xiaohongshu">小红书</option>
+                  <option value="wechat_channels">视频号</option>
+                  <option value="other">其他</option>
+                </select>
+              </label>
+              <label>昵称
+                <input id="acNick" placeholder="博主昵称（必填）" />
+              </label>
+              <label>分类
+                <input id="acCategory" placeholder="商业 / AI / 创业…" />
+              </label>
+              <label>优先级
+                <select id="acPriority"><option>S</option><option>A</option><option selected>B</option></select>
+              </label>
+              <label class="wide">主页链接
+                <input id="acUrl" placeholder="粘贴博主主页 URL（可留空，之后再补）" />
+              </label>
+            </div>
+            <div class="row"><button class="primary" id="acAdd">添加到账号池</button></div>
+          </div>
+
+          <!-- 方式二：搜索填空 —— 先选平台，去平台搜到本人再回填 -->
+          <div class="ac-card">
+            <h4>🔍 搜索填空 <span class="muted">只知道名字，按平台搜到本人再回填</span></h4>
+            <div class="ac-grid">
+              <label>平台
+                <select id="acSearchPlatform">
+                  <option value="douyin">抖音</option>
+                  <option value="xiaohongshu">小红书</option>
+                  <option value="wechat_channels">视频号</option>
+                  <option value="other">其他</option>
+                </select>
+              </label>
+              <label>昵称 / 关键词
+                <input id="acSearchNick" placeholder="博主名字或关键词" />
+              </label>
+              <label class="wide">主页链接
+                <input id="acSearchUrl" placeholder="在搜索页找到本人后，复制其主页 URL 粘贴到这里" />
+              </label>
+            </div>
+            <div class="row">
+              <button id="acSearchJump">🔍 去平台搜索</button>
+              <button class="primary" id="acSearchAdd">添加到账号池</button>
+            </div>
+            <p class="muted" id="acSearchHint">先选平台、填名字，点「去平台搜索」跳到该平台搜索页找本人。</p>
           </div>
         </div>
 
-        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--line);" />
-
-        <h3>AI 智能检索与预测 <span class="muted">— 输入博主名称，智能生成对应平台的博主账号以供导入</span></h3>
-        <div class="row">
-          <input id="acAiQuery" placeholder="输入博主名字或关键词（例如：商业老王 或 科技趋势博主）" style="flex: 1; min-width: 250px;" />
-          <button class="primary" id="acAiSearch">AI 检索</button>
-          <span class="muted" id="acAiSearchMsg"></span>
-        </div>
-        <div id="acAiResults" class="panel" style="margin-top: 12px; display: none; border-color: var(--brand);">
-          <h4 style="margin: 0 0 10px;">检索建议（勾选要导入的账号）：</h4>
-          <div id="acAiResultsTable"></div>
-          <div class="row" style="margin-top: 12px; justify-content: flex-end;">
-            <button class="primary" id="acAiImportSelected">导入选中账号</button>
-          </div>
-        </div>
-
-        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--line);" />
-
+        <hr />
         <div id="acTable"></div>
       </div>
     </section>
@@ -179,14 +190,15 @@
         <h3>AI API Key（BYOK）</h3>
         <div class="row">
           <input id="stApiKey" type="password" placeholder="粘贴主 API Key（加密存储，不外传）" style="flex:1" />
-          <button class="primary" id="stSaveKey">保存</button>
-          <button id="stTestKey">测试</button>
+          <button class="primary" id="stSaveKey">保存主 Key</button>
+          <button id="stTestKey">测试主 Key</button>
           <button class="danger" id="stClearKey">清除</button>
           <span class="muted" id="stKeyState"></span>
         </div>
         <div class="row">
           <input id="stApiKey2" type="password" placeholder="粘贴备用 API Key（可选，主 Key 失败时自动切换）" style="flex:1" />
-          <button class="primary" id="stSaveKey2">保存</button>
+          <button class="primary" id="stSaveKey2">保存备用 Key</button>
+          <button id="stTestKey2">测试备用</button>
           <button class="danger" id="stClearKey2">清除</button>
           <span class="muted" id="stKeyState2"></span>
         </div>

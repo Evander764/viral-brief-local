@@ -58,6 +58,7 @@ export async function runDailyReport({
   // 第 1 步：RPA 浏览器采集（可选跳过）
   // ====================================================================
   let patrolResult = null;
+  let rpaError = null;
 
   if (!skipRpa) {
     progress('rpa', '正在启动浏览器...');
@@ -82,6 +83,7 @@ export async function runDailyReport({
       progress('rpa', `采集完成: 新增 ${patrolResult.newItems} 条，去重 ${patrolResult.duplicates} 条`);
     } catch (rpaErr) {
       // RPA 失败不阻断日报生成——可能数据库里已有足够的数据
+      rpaError = rpaErr.message || String(rpaErr);
       log.warn(`[Pipeline] RPA 采集失败，继续使用已有数据: ${rpaErr.message}`);
       progress('rpa', `采集失败: ${rpaErr.message}（将使用已有数据继续）`);
     } finally {
@@ -188,5 +190,5 @@ export async function runDailyReport({
   progress('done', `日报已生成：${windowType}，达标 ${items.length} 条，${statusStr}`);
   log.info(`日报已生成：${windowType}，达标 ${items.length} 条，${statusStr}`);
 
-  return { report: row, markdown: md, eligibleCount: items.length, aiUsed, patrolResult };
+  return { report: row, markdown: md, eligibleCount: items.length, aiUsed, patrolResult, rpaError };
 }

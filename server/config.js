@@ -21,6 +21,8 @@ const DEFAULTS = {
   pairingToken: '',
   apiKeyEnc: null,
   apiKeyEnc2: null,
+  apiKeyUpdatedAt: null,
+  apiKey2UpdatedAt: null,
 };
 
 /**
@@ -82,7 +84,9 @@ export function loadConfig() {
 
 export function saveConfig(patch = {}) {
   const cfg = loadConfig();
-  const { apiKeyEnc, apiKeyEnc2, apiKey, pairingToken, provider, ...safe } = patch; // 过滤掉 provider / 加密字段，不允许手动指定
+  const {
+    apiKeyEnc, apiKeyEnc2, apiKey, apiKeyUpdatedAt, apiKey2UpdatedAt, pairingToken, provider, ...safe
+  } = patch; // 过滤掉 provider / Key 相关字段，不允许手动指定
   Object.assign(cfg, safe);
   if (patch.schedule) cfg.schedule = { ...cfg.schedule, ...patch.schedule };
   
@@ -107,6 +111,7 @@ function readMerged() {
 export function setApiKey(plain) {
   const cfg = loadConfig();
   cfg.apiKeyEnc = encryptSecret(plain);
+  cfg.apiKeyUpdatedAt = plain ? new Date().toISOString() : null;
   // 换 Key 后必须立刻重新推断供应商：否则同一进程内贴了 Anthropic Key
   // 仍按 openai 走 /chat/completions，导致「测试调用」误判失败（需重启才好）。
   cfg.provider = inferProvider(plain, cfg.baseUrl);
@@ -123,6 +128,7 @@ export function getApiKey2() {
 export function setApiKey2(plain) {
   const cfg = loadConfig();
   cfg.apiKeyEnc2 = encryptSecret(plain);
+  cfg.apiKey2UpdatedAt = plain ? new Date().toISOString() : null;
   writeRaw(cfg);
   refreshRedaction();
 }

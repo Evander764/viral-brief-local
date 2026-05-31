@@ -208,12 +208,9 @@ async function handleApi(req, res, url, segs) {
   // ---- settings - additional ----
   if (p[0] === 'settings') {
     if (p[1] === 'test' && method === 'POST') {
-      try {
-        const r = await testConnection();
-        return sendJson(res, 200, r);
-      } catch (e) {
-        return sendJson(res, 200, { ok: false, error: String(e.message) });
-      }
+      const body = await readJson(req);
+      const r = await testConnection(body);
+      return sendJson(res, 200, r);
     }
     if (p[1] === 'pairing' && p[2] === 'regenerate' && method === 'POST') {
       const t = regeneratePairingToken();
@@ -301,6 +298,7 @@ async function handleApi(req, res, url, segs) {
           eligibleCount: r.eligibleCount,
           aiUsed: r.aiUsed,
           patrolResult: r.patrolResult || null,
+          rpaError: r.rpaError || null,
         });
       } catch (e) {
         return sendJson(res, 200, { error: String(e.message || e) });

@@ -7,7 +7,7 @@
  *  - 准（宁可多花）：返回的 JSON 强制校验，失败就带着「上次哪里错了」重试，
  *    直到拿到合法结构为止——绝不把脏数据吞下去。
  */
-import { loadConfig, getApiKey, getApiKey2, effectiveBaseUrl } from '../config.js';
+import { loadConfig, getApiKey, getApiKey2 } from '../config.js';
 import { addUsage } from '../store.js';
 import { log } from '../lib/log.js';
 
@@ -37,23 +37,51 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+const VALID_PROVIDERS = new Set(['openai', 'openai-compatible', 'anthropic']);
+
+function trimTrailingSlashes(s) {
+  return String(s || '').trim().replace(/\/+$/, '');
+}
+
+/**
+ * 把用户填写的 Base URL 解析成真正请求的 endpoint。
+ * 用户可能填根地址、/v1，也可能直接填完整接口路径；这里统一兜住。
+ */
+export function endpointForProvider(provider, baseUrl = '') {
+  const p = VALID_PROVIDERS.has(provider) ? provider : 'openai-compatible';
+  if (p === 'anthropic') {
+    const base = trimTrailingSlashes(baseUrl) || 'https://api.anthropic.com';
+    if (/\/v1\/messages$/i.test(base)) return base;
+    if (/\/v1$/i.test(base)) return `${base}/messages`;
+    return `${base}/v1/messages`;
+  }
+
+  const base = trimTrailingSlashes(baseUrl) || 'https://api.openai.com/v1';
+  if (/\/chat\/completions$/i.test(base)) return base;
+  return `${base}/chat/completions`;
+}
+
 /** 真正打一次模型，返回 { text, usage }。usage 统一为 {input, output, cached}。 */
 function baseUrlForProvider(provider, cfg, providerOverride) {
   // 备用 Key 可能属于另一家供应商。跨供应商 fallback 时不能沿用主 Key 的
   // baseUrl，否则会出现「主 Key 401 后，备用 Anthropic Key 被发到 DeepSeek」
   // 这类偶发失败。
-  if (!providerOverride || providerOverride === cfg.provider) return effectiveBaseUrl();
+  if (!providerOverride || providerOverride === cfg.provider) {
+    if (cfg.baseUrl) return trimTrailingSlashes(cfg.baseUrl);
+    if (provider === 'anthropic') return 'https://api.anthropic.com';
+    return 'https://api.openai.com/v1';
+  }
   if (provider === 'anthropic') return 'https://api.anthropic.com';
   if (provider === 'openai') return 'https://api.openai.com/v1';
   return (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
 }
 
-async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, providerOverride }) {
+async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, providerOverride, jsonMode = true }) {
   const provider = providerOverride || cfg.provider;
   const base = baseUrlForProvider(provider, cfg, providerOverride);
+  const url = endpointForProvider(provider, base);
 
   if (provider === 'anthropic') {
-    const url = `${base}/v1/messages`;
     const body = {
       model,
       max_tokens: maxTokens || 2048,
@@ -73,6 +101,7 @@ async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, 
     }, cfg.timeoutMs);
     if (!res.ok) throw new AIError(`Anthropic 请求失败 ${res.status}: ${(await safeText(res)).slice(0, 500)}`);
     const data = await res.json();
+    if (!Array.isArray(data.content)) throw new AIError('Anthropic 响应缺少 content');
     const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
     const u = data.usage || {};
     return {
@@ -86,7 +115,6 @@ async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, 
   }
 
   // OpenAI / OpenAI 兼容
-  const url = `${base}/chat/completions`;
   const body = {
     model,
     temperature,
@@ -96,7 +124,7 @@ async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, 
     ],
   };
   // 仅官方 OpenAI 强制 JSON 模式；兼容端点未必支持，靠提示词 + 兜底解析。
-  if (provider === 'openai') body.response_format = { type: 'json_object' };
+  if (provider === 'openai' && jsonMode) body.response_format = { type: 'json_object' };
   if (maxTokens) body.max_tokens = maxTokens;
 
   const res = await fetchWithTimeout(url, {
@@ -106,6 +134,7 @@ async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, 
   }, cfg.timeoutMs);
   if (!res.ok) throw new AIError(`AI 请求失败 ${res.status}: ${(await safeText(res)).slice(0, 500)}`);
   const data = await res.json();
+  if (!Array.isArray(data.choices)) throw new AIError('AI 响应缺少 choices');
   const text = data.choices?.[0]?.message?.content || '';
   const u = data.usage || {};
   return {
@@ -135,6 +164,35 @@ async function callRawWithNetworkRetry(args, retries) {
     }
   }
   throw lastErr;
+}
+
+function inferTestProvider({ provider, apiKey, baseUrl, fallbackProvider }) {
+  if (VALID_PROVIDERS.has(provider)) return provider;
+  const base = String(baseUrl || '').toLowerCase();
+  if ((apiKey && apiKey.startsWith('sk-ant-')) || base.includes('anthropic')) return 'anthropic';
+  if (base && !base.includes('openai.com')) return 'openai-compatible';
+  return VALID_PROVIDERS.has(fallbackProvider) ? fallbackProvider : 'openai';
+}
+
+function classifyTestError(e) {
+  const msg = String(e?.message || e);
+  if (/未配置 API Key/.test(msg)) return { stage: 'config', error: msg };
+  if (/AbortError|aborted|timeout|超时/i.test(msg)) {
+    return { stage: 'timeout', error: 'AI 请求超时。请检查网络、代理或接口地址，必要时调大超时时间。' };
+  }
+  const status = Number(msg.match(/\b(4\d\d|5\d\d)\b/)?.[1] || 0) || undefined;
+  if (status === 401 || status === 403) {
+    return { stage: 'auth', status, error: 'API Key 无效或无权访问该供应商。请确认 Key 属于当前选择的平台。' };
+  }
+  if (status === 404) {
+    return { stage: 'model', status, error: '模型不存在、不可用，或 Base URL 路径不正确。请检查模型名和接口地址。' };
+  }
+  if (status === 429) {
+    return { stage: 'rate_limit', status, error: '接口限流或额度不足（429）。请稍后重试或更换额度充足的 Key。' };
+  }
+  if (status) return { stage: 'request', status, error: `接口请求失败（HTTP ${status}）。请检查供应商、Base URL 和模型名。` };
+  if (/JSON|不是有效|未返回|响应缺少|Unexpected token|Unexpected end/i.test(msg)) return { stage: 'json', error: '接口已返回，但响应不是预期 JSON。请确认该模型支持聊天补全并可正常输出。' };
+  return { stage: 'request', error: msg || 'AI 测试请求失败。' };
 }
 
 /**
@@ -246,14 +304,45 @@ async function tryBackupKey({ system, user, model, temperature, maxTokens, task,
 }
 
 /** 配置页的「测试调用」用：用最小代价验证 Key/模型可用。 */
-export async function testConnection() {
-  const cfg = loadConfig();
-  const { json, model, usage } = await callJSON({
-    system: '你是一个连通性测试器。无论收到什么，只返回 {"ok": true}。',
-    user: '请只返回 {"ok": true}',
-    task: 'test',
-    maxTokens: 50,
-    validate: (j) => (j && j.ok === true ? null : '未返回 {"ok":true}'),
+export async function testConnection(overrides = {}) {
+  const saved = loadConfig();
+  const tempKey = typeof overrides.apiKey === 'string' ? overrides.apiKey.trim() : '';
+  const keySlot = overrides.keySlot === 'backup' ? 'backup' : 'primary';
+  const savedKey = keySlot === 'backup' ? getApiKey2() : getApiKey();
+  const key = tempKey || savedKey;
+  const baseUrl = Object.hasOwn(overrides, 'baseUrl') ? String(overrides.baseUrl || '').trim() : saved.baseUrl;
+  const provider = inferTestProvider({
+    provider: overrides.provider,
+    apiKey: key,
+    baseUrl,
+    fallbackProvider: saved.provider,
   });
-  return { ok: true, model, usage, provider: cfg.provider, baseUrl: effectiveBaseUrl() };
+  const model = String(overrides.model || saved.model || '').trim();
+  const cfg = { ...saved, provider, baseUrl, model };
+  const endpoint = endpointForProvider(provider, baseUrl);
+
+  if (!key) {
+    const label = keySlot === 'backup' ? '备用 API Key' : 'API Key';
+    return { ok: false, stage: 'config', keySlot, provider, model, endpoint, error: `未配置${label}。请粘贴 Key 后测试，或先保存 Key。` };
+  }
+  if (!model) {
+    return { ok: false, stage: 'config', keySlot, provider, model, endpoint, error: '未填写模型名。请选择供应商后填写模型。' };
+  }
+
+  try {
+    const raw = await callRawWithNetworkRetry({
+      system: '你是一个连通性测试器。请用最短内容回复。',
+      user: '请回复 OK',
+      model,
+      temperature: 0,
+      maxTokens: 50,
+      key,
+      cfg,
+      jsonMode: false,
+    }, 0);
+    addUsage({ task: 'test', model, input: raw.usage.input, output: raw.usage.output, cached: raw.usage.cached });
+    return { ok: true, keySlot, provider, model, endpoint, usage: raw.usage };
+  } catch (e) {
+    return { ok: false, keySlot, provider, model, endpoint, ...classifyTestError(e) };
+  }
 }

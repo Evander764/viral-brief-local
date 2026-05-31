@@ -55,18 +55,31 @@ body {
   min-height: 100vh;
 }
 
-.manual-import {
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  padding: 18px 0;
-  margin: 18px 0;
+/* ─── Account add: two clean methods (手动填写 / 搜索填空) ─── */
+.ac-add {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
 }
-
-.manual-import textarea {
-  width: 100%;
-  resize: vertical;
-  min-height: 120px;
+.ac-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+  background: var(--bg-surface);
 }
+.ac-card h4 {
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.ac-card h4 .muted { font-weight: 400; margin-left: 6px; }
+.ac-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
+  margin-bottom: 12px;
+}
+.ac-grid label.wide { grid-column: 1 / -1; }
 
 /* Background mesh */
 body::before {

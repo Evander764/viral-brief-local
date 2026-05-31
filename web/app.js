@@ -116,6 +116,8 @@ async function generateReport(win, msgEl, skipRpa = false) {
     let detail = `达标 ${r.eligibleCount} 条`;
     if (r.patrolResult) {
       detail += ` | 采集: 新增 ${r.patrolResult.newItems}, 去重 ${r.patrolResult.duplicates}`;
+    } else if (r.rpaError) {
+      detail += ` | RPA 未完成：${r.rpaError}`;
     }
     if (!r.aiUsed) detail += '（0 达标，未调用 AI）';
     msgEl.textContent = `✅ 完成：${detail}`;
@@ -277,9 +279,9 @@ $('#candBatchConfirm').addEventListener('click', async () => {
 $('#candRunRpa').addEventListener('click', async (e) => {
   const btn = e.target;
   btn.disabled = true;
-  btn.textContent = '启动中... (请查看弹出的 Chrome 窗口)';
+  btn.textContent = '启动中... (使用已登录 Chrome)';
   try {
-    toast('正在启动 RPA...', 'ok');
+    toast('正在启动已登录 Chrome 巡检...', 'ok');
     const res = await api('/patrol/run', { method: 'POST' });
     if (res.error) throw new Error(res.error);
     toast('自动巡检完成！', 'ok');
@@ -393,7 +395,7 @@ async function loadAccounts() {
         <button data-del="${a.id}">删除</button>
       </td>
     </tr>`).join('')}
-    </tbody></table>` : '<p class="muted">还没有账号。手动添加或导入 CSV。</p>';
+    </tbody></table>` : '<p class="muted">还没有账号。用上方「手动填写」或「搜索填空」添加。</p>';
   $$('#acTable [data-save]').forEach((b) => b.addEventListener('click', async () => {
     const row = b.closest('tr');
     const val = (f) => row.querySelector(`[data-af="${f}"]`).value;
@@ -419,208 +421,64 @@ async function loadAccounts() {
     loadAccounts();
   }));
 }
+// 方式一「手动填写」：固定字段逐项填，系统给格式，用户不用自己排版。
 $('#acAdd').addEventListener('click', async () => {
   const body = {
-    nickname: $('#acNick').value.trim(), platform: $('#acPlatform').value,
-    homepage_url: $('#acUrl').value.trim(), category: $('#acCategory').value.trim(),
+    platform: $('#acPlatform').value,
+    nickname: $('#acNick').value.trim(),
+    homepage_url: $('#acUrl').value.trim(),
+    category: $('#acCategory').value.trim(),
     priority: $('#acPriority').value,
+    monitor_enabled: true,
   };
   if (!body.nickname) return toast('请填写昵称', 'bad');
   await api('/accounts', { method: 'POST', body: JSON.stringify(body) });
   $('#acNick').value = ''; $('#acUrl').value = ''; $('#acCategory').value = '';
   accountsCache = [];
-  toast('已添加'); loadAccounts();
+  toast('已添加', 'ok'); loadAccounts();
 });
-$('#acCsv').addEventListener('change', async (e) => {
-  const file = e.target.files[0]; if (!file) return;
-  const csv = await file.text();
-  const r = await api('/accounts/import', { method: 'POST', body: JSON.stringify({ csv }) });
+
+// 方式二「搜索填空」：先选平台 → 用昵称跳到该平台搜索页找到本人 → 回填主页链接后添加。
+// 搜索链接是确定性拼接（与 server/lib/platform-links.js 一致），不经过 AI，绝不给死链。
+function acSearchUrl(platform, nickname) {
+  const q = encodeURIComponent(String(nickname || '').trim());
+  if (!q) return '';
+  switch (platform) {
+    case 'douyin': return `https://www.douyin.com/search/${q}`;
+    case 'xiaohongshu': return `https://www.xiaohongshu.com/search_result?keyword=${q}&type=54`;
+    case 'wechat_channels': return `https://www.google.com/search?q=${q}+微信视频号`;
+    default: return `https://www.google.com/search?q=${q}`;
+  }
+}
+function syncSearchJumpLabel() {
+  const p = $('#acSearchPlatform').value;
+  $('#acSearchJump').textContent = `🔍 去${PLATFORM_LABEL[p] || '平台'}搜索`;
+}
+$('#acSearchPlatform').addEventListener('change', syncSearchJumpLabel);
+syncSearchJumpLabel();
+
+$('#acSearchJump').addEventListener('click', () => {
+  const nick = $('#acSearchNick').value.trim();
+  if (!nick) return toast('请先输入昵称或关键词', 'bad');
+  window.open(acSearchUrl($('#acSearchPlatform').value, nick), '_blank', 'noopener');
+  $('#acSearchHint').textContent = '已打开搜索页 → 找到本人后，复制其主页链接粘贴到上方，再点「添加到账号池」。';
+});
+
+$('#acSearchAdd').addEventListener('click', async () => {
+  const body = {
+    platform: $('#acSearchPlatform').value,
+    nickname: $('#acSearchNick').value.trim(),
+    homepage_url: $('#acSearchUrl').value.trim(),
+    category: '',
+    priority: 'B',
+    monitor_enabled: true,
+  };
+  if (!body.nickname) return toast('请填写昵称', 'bad');
+  await api('/accounts', { method: 'POST', body: JSON.stringify(body) });
+  $('#acSearchNick').value = ''; $('#acSearchUrl').value = '';
+  $('#acSearchHint').textContent = '';
   accountsCache = [];
-  toast(`导入 ${r.imported} 个账号`, 'ok'); loadAccounts(); e.target.value = '';
-});
-
-$('#acManualImport').addEventListener('click', async () => {
-  const text = $('#acManualText').value.trim();
-  if (!text) return toast('请先粘贴要导入的账号', 'bad');
-  $('#acManualImport').disabled = true;
-  $('#acManualMsg').textContent = '导入中…';
-  try {
-    const r = await api('/accounts/import-lines', { method: 'POST', body: JSON.stringify({ text }) });
-    accountsCache = [];
-    const err = r.errors?.length ? `，${r.errors.length} 行需检查` : '';
-    $('#acManualMsg').textContent = `导入/更新 ${r.imported} 个，跳过 ${r.skipped || 0} 行${err}`;
-    toast(`已导入/更新 ${r.imported} 个账号`, r.errors?.length ? '' : 'ok');
-    loadAccounts();
-  } catch (e) {
-    $('#acManualMsg').textContent = '';
-    toast('导入失败：' + e.message, 'bad');
-  } finally {
-    $('#acManualImport').disabled = false;
-  }
-});
-$('#acManualClear').addEventListener('click', () => {
-  $('#acManualText').value = '';
-  $('#acManualMsg').textContent = '';
-});
-
-$('#acAiFill').addEventListener('click', async () => {
-  const nick = $('#acNick').value.trim();
-  if (!nick) return toast('请先输入昵称', 'bad');
-
-  $('#acAiFill').disabled = true;
-  const originalText = $('#acAiFill').textContent;
-  $('#acAiFill').textContent = '补齐中…';
-
-  try {
-    const res = await api('/accounts/search-suggest', { method: 'POST', body: JSON.stringify({ q: nick }) });
-    const suggestions = res.suggestions || [];
-    if (suggestions.length === 0) {
-      toast('未能检索到匹配信息，请手动填写', 'bad');
-      return;
-    }
-    const match = suggestions.find(s => s.nickname.toLowerCase().includes(nick.toLowerCase())) || suggestions[0];
-    if (match) {
-      $('#acPlatform').value = match.platform;
-      // 有已验证主页就用主页，否则用一定能打开的平台搜索链接兜底（不再留死链/空）。
-      $('#acUrl').value = match.homepage_url || match.search_url || '';
-      $('#acCategory').value = match.category || '';
-      if (['S', 'A', 'B'].includes(match.priority)) {
-        $('#acPriority').value = match.priority;
-      } else {
-        $('#acPriority').value = 'B';
-      }
-      toast(match.link_verified ? '已补齐（含已验证主页）' : '已补齐（主页用搜索链接兜底，可手动替换）', 'ok');
-    }
-  } catch (e) {
-    toast('API 调用失败：' + e.message, 'bad');
-  } finally {
-    $('#acAiFill').disabled = false;
-    $('#acAiFill').textContent = originalText;
-  }
-});
-
-let aiSuggestions = [];
-
-$('#acAiSearch').addEventListener('click', async () => {
-  const q = $('#acAiQuery').value.trim();
-  if (!q) return toast('请输入博主名称或关键词', 'bad');
-  
-  $('#acAiSearchMsg').textContent = '检索中，请稍候…';
-  $('#acAiSearch').disabled = true;
-  $('#acAiResults').style.display = 'none';
-  
-  try {
-    const res = await api('/accounts/search-suggest', { method: 'POST', body: JSON.stringify({ q }) });
-    aiSuggestions = res.suggestions || [];
-    $('#acAiSearchMsg').textContent = '';
-    
-    if (aiSuggestions.length === 0) {
-      toast('未找到匹配博主，请更换关键词重试', 'bad');
-      return;
-    }
-    
-    $('#acAiResultsTable').innerHTML = `
-      <table>
-        <thead>
-          <tr>
-            <th style="width: 40px; text-align: center;"><input type="checkbox" id="acAiSelectAll" checked /></th>
-            <th>平台</th>
-            <th>昵称</th>
-            <th>分类</th>
-            <th>优先级</th>
-            <th>简介</th>
-            <th>主页链接</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${aiSuggestions.map((item, idx) => `
-            <tr data-ai-idx="${idx}">
-              <td style="text-align: center; vertical-align: middle;">
-                <input type="checkbox" class="ac-ai-cb" data-idx="${idx}" checked />
-              </td>
-              <td>
-                <select data-af="platform">
-                  <option value="douyin" ${item.platform === 'douyin' ? 'selected' : ''}>抖音</option>
-                  <option value="xiaohongshu" ${item.platform === 'xiaohongshu' ? 'selected' : ''}>小红书</option>
-                  <option value="wechat_channels" ${item.platform === 'wechat_channels' ? 'selected' : ''}>视频号</option>
-                  <option value="other" ${item.platform === 'other' ? 'selected' : ''}>其他</option>
-                </select>
-              </td>
-              <td><input data-af="nickname" value="${esc(item.nickname)}" style="font-weight:600;min-width:80px" /></td>
-              <td><input data-af="category" value="${esc(item.category || '')}" placeholder="分类" style="min-width:60px" /></td>
-              <td>
-                <select data-af="priority">
-                  <option value="S" ${item.priority === 'S' ? 'selected' : ''}>S</option>
-                  <option value="A" ${item.priority === 'A' ? 'selected' : ''}>A</option>
-                  <option value="B" ${(item.priority || 'B') === 'B' ? 'selected' : ''}>B</option>
-                </select>
-              </td>
-              <td><span class="muted">${esc(item.description || '—')}</span></td>
-              <td>
-                <input data-af="homepage_url" value="${esc(item.homepage_url || item.search_url || '')}" placeholder="主页链接" style="min-width:140px;font-size:11px" />
-                <div style="font-size:11px;margin-top:3px">
-                  ${item.link_verified
-                    ? '<span style="color:var(--ok)">✓ 已验证主页</span>'
-                    : '<span class="muted">🔍 搜索链接（点开找到本人后可替换为真实主页）</span>'}
-                  ${(item.homepage_url || item.search_url) ? ` <a href="${esc(item.homepage_url || item.search_url)}" target="_blank" rel="noreferrer">打开</a>` : ''}
-                </div>
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    `;
-    
-    $('#acAiSelectAll').addEventListener('change', (e) => {
-      $$('.ac-ai-cb').forEach((cb) => cb.checked = e.target.checked);
-    });
-    
-    $('#acAiResults').style.display = 'block';
-  } catch (e) {
-    $('#acAiSearchMsg').textContent = '';
-    toast('API 调用失败：' + e.message, 'bad');
-  } finally {
-    $('#acAiSearch').disabled = false;
-  }
-});
-
-$('#acAiImportSelected').addEventListener('click', async () => {
-  const cbs = $$('.ac-ai-cb:checked');
-  if (cbs.length === 0) return toast('请先勾选要导入的账号', 'bad');
-  
-  $('#acAiImportSelected').disabled = true;
-  let successCount = 0;
-  for (const cb of cbs) {
-    const row = cb.closest('tr');
-    if (!row) continue;
-    // 从 DOM 输入控件读取用户编辑后的值
-    const val = (f) => { const el = row.querySelector(`[data-af="${f}"]`); return el ? el.value : ''; };
-    
-    try {
-      await api('/accounts', {
-        method: 'POST',
-        body: JSON.stringify({
-          platform: val('platform'),
-          nickname: val('nickname').trim(),
-          homepage_url: val('homepage_url').trim(),
-          category: val('category').trim() || '商业',
-          priority: val('priority') || 'B',
-          monitor_enabled: true
-        })
-      });
-      successCount++;
-    } catch (e) {
-      console.error('导入账号失败:', val('nickname'), e);
-    }
-  }
-  
-  accountsCache = [];
-  toast(`成功导入 ${successCount} 个账号`, 'ok');
-  loadAccounts();
-  
-  $('#acAiResults').style.display = 'none';
-  $('#acAiQuery').value = '';
-  $('#acAiImportSelected').disabled = false;
+  toast('已添加', 'ok'); loadAccounts();
 });
 
 // ---------------------------------------------------------------- reports ----
@@ -662,12 +520,26 @@ const VENDORS = {
   custom:      { name: '自定义', baseUrl: '', models: [], apply: '' },
 };
 
+function providerForVendor(vendorKey, baseUrl = '', apiKey = '') {
+  const b = String(baseUrl || '').toLowerCase();
+  if (vendorKey === 'anthropic' || apiKey.startsWith('sk-ant-') || b.includes('anthropic')) return 'anthropic';
+  if (vendorKey === 'openai' || !b || b.includes('openai.com')) return 'openai';
+  return 'openai-compatible';
+}
+
+function normalizeVendorBaseUrl(baseUrl) {
+  let b = String(baseUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+  b = b.replace(/\/chat\/completions$/i, '');
+  b = b.replace(/\/v1\/messages$/i, '');
+  return b;
+}
+
 /** 根据已保存的 baseUrl 反推选中哪个供应商（用于回填下拉框）。 */
 function vendorFromBaseUrl(baseUrl) {
-  const b = (baseUrl || '').replace(/\/$/, '').toLowerCase();
+  const b = normalizeVendorBaseUrl(baseUrl);
   if (!b) return 'openai';
   for (const [key, v] of Object.entries(VENDORS)) {
-    if (v.baseUrl && v.baseUrl.toLowerCase().replace(/\/$/, '') === b) return key;
+    if (v.baseUrl && normalizeVendorBaseUrl(v.baseUrl) === b) return key;
   }
   return 'custom';
 }
@@ -705,18 +577,88 @@ async function loadSettings() {
   $('#stBudget').value = c.budgetDailyTokens || 0;
   $('#stToken').textContent = c.pairingToken;
   $('#stEndpoint').textContent = `http://127.0.0.1:${PORT}`;
-  $('#stKeyState').textContent = c.hasApiKey ? `已配置（末4位 ${c.apiKeyLast4}）` : '未配置';
-  $('#stKeyState2').textContent = c.hasApiKey2 ? `已配置（末4位 ${c.apiKey2Last4}）` : '未配置';
+  renderSettingsKeyState(c);
   renderKeyState(c.hasApiKey, c.schedule);
 }
+
+function fmtSavedAt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `，保存于 ${d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function renderSettingsKeyState(c) {
+  $('#stKeyState').textContent = c.hasApiKey ? `已配置（末4位 ${c.apiKeyLast4}${fmtSavedAt(c.apiKeyUpdatedAt)}）` : '未配置';
+  $('#stKeyState2').textContent = c.hasApiKey2 ? `已配置（末4位 ${c.apiKey2Last4}${fmtSavedAt(c.apiKey2UpdatedAt)}）` : '未配置';
+}
+
+function currentAiTestBody({ includeTypedKey = true, keySlot = 'primary' } = {}) {
+  const inputId = keySlot === 'backup' ? '#stApiKey2' : '#stApiKey';
+  const apiKey = $(inputId).value.trim();
+  const baseUrl = $('#stBaseUrl').value.trim();
+  return {
+    keySlot,
+    provider: providerForVendor($('#stVendor').value, baseUrl, apiKey),
+    baseUrl,
+    model: $('#stModel').value.trim(),
+    ...(includeTypedKey && apiKey ? { apiKey } : {}),
+  };
+}
+
+function renderAiTestResult(r) {
+  const usage = r.usage ? ` ｜ token ${fmt((r.usage.input || 0) + (r.usage.output || 0))}` : '';
+  const keyLabel = r.keySlot === 'backup' ? '备用 Key' : '主 Key';
+  $('#stTestDetail').textContent = r.ok
+    ? `${keyLabel} 可用：${r.provider || '—'} ｜ 模型 ${r.model || '—'} ｜ endpoint ${r.endpoint || '—'}${usage}`
+    : `${keyLabel} 不可用：${r.stage || 'request'}${r.status ? ` / HTTP ${r.status}` : ''} ｜ ${r.error || '测试失败'} ｜ endpoint ${r.endpoint || '—'}`;
+}
+
+async function testCurrentAiSettings({ includeTypedKey = true, keySlot = 'primary' } = {}) {
+  const r = await api('/settings/test', {
+    method: 'POST',
+    body: JSON.stringify(currentAiTestBody({ includeTypedKey, keySlot })),
+  });
+  renderAiTestResult(r);
+  const keyLabel = keySlot === 'backup' ? '备用 Key' : '主 Key';
+  toast(r.ok ? `${keyLabel} 连通正常（模型 ${r.model}）` : `${keyLabel} 测试失败：${r.error}`, r.ok ? 'ok' : 'bad');
+  return r;
+}
+
+function renderSavedButTestFailed(keyLabel, r) {
+  $('#stTestDetail').textContent = `${keyLabel} 已覆盖保存，但测试失败：${r.error || '测试失败'}${r.status ? `（HTTP ${r.status}）` : ''} ｜ endpoint ${r.endpoint || '—'}`;
+}
+
 $('#stSaveKey').addEventListener('click', async () => {
   const apiKey = $('#stApiKey').value.trim();
   if (!apiKey) return toast('请粘贴 API Key', 'bad');
-  // 先持久化接口地址/模型，再存 Key——否则刚选的供应商地址还没落库，
-  // setApiKey 会用旧地址推断 provider（小米的 Key 配 DeepSeek 地址 = 401）。
-  await api('/settings', { method: 'PUT', body: JSON.stringify({ baseUrl: $('#stBaseUrl').value.trim(), model: $('#stModel').value.trim() }) });
-  await api('/settings/apikey', { method: 'POST', body: JSON.stringify({ apiKey }) });
-  $('#stApiKey').value = ''; toast('已保存接口地址 + Key（加密存储）', 'ok'); loadSettings(); loadOverview();
+  let saved = false;
+  try {
+    // 先持久化接口地址/模型，再存 Key——否则刚选的供应商地址还没落库，
+    // setApiKey 会用旧地址推断 provider（小米的 Key 配 DeepSeek 地址 = 401）。
+    await api('/settings', { method: 'PUT', body: JSON.stringify({ baseUrl: $('#stBaseUrl').value.trim(), model: $('#stModel').value.trim() }) });
+    const pub = await api('/settings/apikey', { method: 'POST', body: JSON.stringify({ apiKey }) });
+    saved = true;
+    renderSettingsKeyState(pub);
+    renderKeyState(pub.hasApiKey, pub.schedule);
+    $('#stApiKey').value = '';
+    $('#stTestDetail').textContent = '主 Key 已覆盖保存，正在测试...';
+    toast('主 Key 已覆盖保存，正在测试...', 'ok');
+  } catch (e) {
+    $('#stTestDetail').textContent = `主 Key 保存失败：${e.message}`;
+    return toast('主 Key 保存失败：' + e.message, 'bad');
+  }
+
+  try {
+    const r = await testCurrentAiSettings({ includeTypedKey: false, keySlot: 'primary' });
+    if (!r.ok) renderSavedButTestFailed('主 Key', r);
+  } catch (e) {
+    if (saved) {
+      $('#stTestDetail').textContent = `主 Key 已覆盖保存，但测试请求失败：${e.message}`;
+      toast('主 Key 已覆盖保存，但测试失败：' + e.message, 'bad');
+    }
+  }
+  loadSettings(); loadOverview();
 });
 $('#stClearKey').addEventListener('click', async () => {
   if (!confirm('确认清除已保存的 API Key？')) return;
@@ -725,8 +667,30 @@ $('#stClearKey').addEventListener('click', async () => {
 $('#stSaveKey2').addEventListener('click', async () => {
   const apiKey = $('#stApiKey2').value.trim();
   if (!apiKey) return toast('请粘贴备用 API Key', 'bad');
-  await api('/settings/apikey2', { method: 'POST', body: JSON.stringify({ apiKey }) });
-  $('#stApiKey2').value = ''; toast('备用 Key 已保存', 'ok'); loadSettings();
+  let saved = false;
+  try {
+    await api('/settings', { method: 'PUT', body: JSON.stringify({ baseUrl: $('#stBaseUrl').value.trim(), model: $('#stModel').value.trim() }) });
+    const pub = await api('/settings/apikey2', { method: 'POST', body: JSON.stringify({ apiKey }) });
+    saved = true;
+    renderSettingsKeyState(pub);
+    $('#stApiKey2').value = '';
+    $('#stTestDetail').textContent = '备用 Key 已覆盖保存，正在测试...';
+    toast('备用 Key 已覆盖保存，正在测试...', 'ok');
+  } catch (e) {
+    $('#stTestDetail').textContent = `备用 Key 保存失败：${e.message}`;
+    return toast('备用 Key 保存失败：' + e.message, 'bad');
+  }
+
+  try {
+    const r = await testCurrentAiSettings({ includeTypedKey: false, keySlot: 'backup' });
+    if (!r.ok) renderSavedButTestFailed('备用 Key', r);
+  } catch (e) {
+    if (saved) {
+      $('#stTestDetail').textContent = `备用 Key 已覆盖保存，但测试请求失败：${e.message}`;
+      toast('备用 Key 已覆盖保存，但测试失败：' + e.message, 'bad');
+    }
+  }
+  loadSettings();
 });
 $('#stClearKey2').addEventListener('click', async () => {
   if (!confirm('确认清除备用 API Key？')) return;
@@ -735,14 +699,19 @@ $('#stClearKey2').addEventListener('click', async () => {
 $('#stTestKey').addEventListener('click', async () => {
   toast('测试中…');
   try {
-    const r = await api('/settings/test', { method: 'POST' });
-    $('#stTestDetail').textContent = r.ok
-      ? `当前调用：${r.provider || '—'} ｜ ${r.baseUrl || '—'} ｜ 模型 ${r.model}`
-      : '';
-    toast(r.ok ? `连通正常（模型 ${r.model}）` : '测试失败：' + r.error, r.ok ? 'ok' : 'bad');
+    await testCurrentAiSettings({ keySlot: 'primary' });
   } catch (e) {
     $('#stTestDetail').textContent = '';
     toast('测试失败：' + e.message, 'bad');
+  }
+});
+$('#stTestKey2').addEventListener('click', async () => {
+  toast('备用 Key 测试中…');
+  try {
+    await testCurrentAiSettings({ keySlot: 'backup' });
+  } catch (e) {
+    $('#stTestDetail').textContent = '';
+    toast('备用 Key 测试失败：' + e.message, 'bad');
   }
 });
 $('#stSaveSettings').addEventListener('click', async () => {

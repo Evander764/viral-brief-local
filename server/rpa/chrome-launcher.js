@@ -1,20 +1,24 @@
 /**
  * Chrome 进程管理器。
  *
- * 自动启动一个带有 --remote-debugging-port 的独立 Chrome 实例，
- * 并等待端口就绪后返回。使用独立的 user-data-dir 避免干扰用户日常浏览器。
+ * 自动启动一个带有 --remote-debugging-port 的 Chrome 实例，
+ * 并等待端口就绪后返回。默认使用用户真实 Chrome 资料目录，让小红书/抖音沿用
+ * 已登录 Cookie；如需隔离资料目录，可设置 VB_RPA_CHROME_MODE=isolated。
  *
  * 关键改进：
  * - 支持多路径查找 Chrome（Chrome / Chrome Canary / Chromium）
  * - `isPortReady` 真正校验 JSON 响应（避免 "Using unsafe..." 类似非 JSON 被当作 ready）
  * - 更清晰的错误信息帮助用户排查
  */
-import { exec, execSync } from 'node:child_process';
-import { mkdirSync, existsSync } from 'node:fs';
+import { execFile, execSync } from 'node:child_process';
+import { mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { log } from '../lib/log.js';
 import { CHROME_PROFILE_DIR } from '../lib/paths.js';
 
 const DEFAULT_PORT = 9222;
+const LOGGED_IN_CHROME_DIR_MAC = join(homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
 
 /** macOS 上可能的 Chrome 安装路径（按优先级排列）。 */
 const CHROME_PATHS_MAC = [
@@ -46,16 +50,81 @@ function findChromePath() {
 }
 
 /**
- * 检查指定端口是否已有进程占用（用于清理残留 Chrome 进程）。
- * @returns {boolean}
+ * 取监听调试端口的进程命令行，用于避免误连到旧的空白 RPA Chrome。
+ * @returns {string}
  */
-function isPortInUse(port) {
+function commandForPort(port) {
   try {
-    const result = execSync(`lsof -i :${port} -t 2>/dev/null`, { encoding: 'utf8', timeout: 3000 }).trim();
-    return !!result;
+    const pid = execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN -t 2>/dev/null | head -n 1`, {
+      encoding: 'utf8',
+      timeout: 3000,
+    }).trim();
+    if (!pid) return '';
+    return execSync(`ps -p ${pid} -o command=`, { encoding: 'utf8', timeout: 3000 }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function isChromeRunning() {
+  if (process.platform !== 'darwin') return false;
+  try {
+    const out = execSync(`pgrep -x "Google Chrome" 2>/dev/null`, { encoding: 'utf8', timeout: 3000 }).trim();
+    return !!out;
   } catch {
     return false;
   }
+}
+
+function readChromeProfile(userDataDir) {
+  const envProfile = String(process.env.VB_RPA_CHROME_PROFILE || '').trim();
+  if (envProfile) return envProfile;
+
+  try {
+    const localState = JSON.parse(readFileSync(join(userDataDir, 'Local State'), 'utf8'));
+    return localState.profile?.last_used
+      || localState.profile?.last_active_profiles?.[0]
+      || 'Default';
+  } catch {
+    return 'Default';
+  }
+}
+
+function resolveChromeSession(opts = {}) {
+  const mode = String(process.env.VB_RPA_CHROME_MODE || opts.mode || 'logged-in').toLowerCase();
+  const explicitDir = opts.dataDir || process.env.VB_RPA_CHROME_USER_DATA_DIR;
+  if (explicitDir) {
+    const userDataDir = resolve(explicitDir);
+    return {
+      mode: 'custom',
+      userDataDir,
+      profileDirectory: readChromeProfile(userDataDir),
+      expectsLoggedInProfile: true,
+    };
+  }
+
+  if (mode === 'isolated') {
+    return {
+      mode,
+      userDataDir: CHROME_PROFILE_DIR,
+      profileDirectory: 'Default',
+      expectsLoggedInProfile: false,
+    };
+  }
+
+  return {
+    mode: 'logged-in',
+    userDataDir: LOGGED_IN_CHROME_DIR_MAC,
+    profileDirectory: readChromeProfile(LOGGED_IN_CHROME_DIR_MAC),
+    expectsLoggedInProfile: true,
+  };
+}
+
+function commandUsesUserDataDir(command, userDataDir) {
+  if (!command || !userDataDir) return false;
+  const normalizedCommand = command.replace(/\\ /g, ' ');
+  return normalizedCommand.includes(`--user-data-dir=${userDataDir}`)
+    || normalizedCommand.includes(`--user-data-dir="${userDataDir}"`);
 }
 
 /**
@@ -66,15 +135,32 @@ function isPortInUse(port) {
  * @param {number} [opts.waitMs=15000] 等待端口就绪的超时（毫秒）
  * @returns {Promise<{child: ChildProcess|null, port: number}>}
  */
-export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 15000 } = {}) {
+export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 15000, mode } = {}) {
+  const session = resolveChromeSession({ dataDir, mode });
+
   // 先检查端口是否已经可用（用户可能已经手动启动了 Chrome）
   if (await isPortReady(port)) {
+    const command = commandForPort(port);
+    if (session.expectsLoggedInProfile && command && command.includes('--user-data-dir=')
+        && !commandUsesUserDataDir(command, session.userDataDir)) {
+      throw new Error(
+        `RPA 调试端口 ${port} 已被另一个 Chrome 占用，但它不是当前登录资料目录。\n` +
+        `请关闭旧的 RPA Chrome 后重试，或确认它使用的是：${session.userDataDir}`
+      );
+    }
     log.info(`Chrome 调试端口 ${port} 已就绪（外部启动），跳过启动。`);
-    return { child: null, port };
+    return { child: null, port, userDataDir: session.userDataDir, profileDirectory: session.profileDirectory };
   }
 
-  const userDataDir = dataDir || CHROME_PROFILE_DIR;
-  mkdirSync(userDataDir, { recursive: true });
+  if (session.expectsLoggedInProfile && process.platform === 'darwin' && isChromeRunning()) {
+    throw new Error(
+      '当前 Chrome 已在运行，但没有开启 RPA 调试端口，应用无法直接接管它。\n' +
+      '请先完全退出 Google Chrome，再点「一键自动巡检」。应用会用同一份已登录资料目录重新打开 Chrome，登录态会保留。\n' +
+      `使用的资料目录：${session.userDataDir}`
+    );
+  }
+
+  mkdirSync(session.userDataDir, { recursive: true });
 
   const chromePath = findChromePath();
   if (!chromePath) {
@@ -86,15 +172,16 @@ export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 1500
 
   const args = [
     `--remote-debugging-port=${port}`,
-    `--user-data-dir=${userDataDir}`,
+    `--user-data-dir=${session.userDataDir}`,
+    `--profile-directory=${session.profileDirectory}`,
     '--no-first-run',
     '--no-default-browser-check',
-  ].join(' ');
+    '--restore-last-session',
+  ];
 
-  const cmd = `"${chromePath}" ${args}`;
-  log.info(`启动 RPA Chrome: port=${port}, path=${chromePath}`);
+  log.info(`启动 RPA Chrome: port=${port}, profile=${session.profileDirectory}, dataDir=${session.userDataDir}`);
 
-  const child = exec(cmd);
+  const child = execFile(chromePath, args);
   // 收集 stderr 用于诊断（限制大小避免内存泄漏）
   let stderrBuf = '';
   child.stderr?.on('data', (chunk) => {
@@ -114,7 +201,7 @@ export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 1500
   }
 
   log.info(`Chrome 已就绪，调试端口 ${port}`);
-  return { child, port };
+  return { child, port, userDataDir: session.userDataDir, profileDirectory: session.profileDirectory };
 }
 
 /**

@@ -22,6 +22,7 @@ test('API Key 加密往返：存进去能解出来', () => {
   setApiKey('sk-test-1234567890abcdef');
   assert.equal(getApiKey(), 'sk-test-1234567890abcdef');
   assert.equal(hasApiKey(), true);
+  assert.ok(Date.parse(getPublicConfig().apiKeyUpdatedAt));
 });
 
 test('getPublicConfig 绝不泄露明文 Key，只给末 4 位', () => {
@@ -73,13 +74,37 @@ test('备用 Key 独立加密存取', () => {
   assert.equal(getApiKey2(), 'sk-backup-888888888888');
   assert.equal(getPublicConfig().hasApiKey2, true);
   assert.equal(getPublicConfig().apiKey2Last4, '8888');
+  assert.ok(Date.parse(getPublicConfig().apiKey2UpdatedAt));
 });
 
-test('clearApiKey 清除主 Key', () => {
+test('重复保存 API Key 会覆盖旧 Key，并更新公开状态', async () => {
+  setApiKey('sk-old-key-1111');
+  const first = getPublicConfig().apiKeyUpdatedAt;
+  await new Promise((r) => setTimeout(r, 2));
+  setApiKey('sk-new-key-2222');
+  const pub = getPublicConfig();
+  assert.equal(getApiKey(), 'sk-new-key-2222');
+  assert.equal(pub.apiKeyLast4, '2222');
+  assert.notEqual(pub.apiKeyUpdatedAt, first);
+});
+
+test('重复保存备用 API Key 会覆盖旧 Key，并更新公开状态', async () => {
+  setApiKey2('sk-backup-old-3333');
+  const first = getPublicConfig().apiKey2UpdatedAt;
+  await new Promise((r) => setTimeout(r, 2));
+  setApiKey2('sk-backup-new-4444');
+  const pub = getPublicConfig();
+  assert.equal(getApiKey2(), 'sk-backup-new-4444');
+  assert.equal(pub.apiKey2Last4, '4444');
+  assert.notEqual(pub.apiKey2UpdatedAt, first);
+});
+
+test('clearApiKey 清除主 Key 与保存时间', () => {
   setApiKey('sk-tobecleared-1234567');
   clearApiKey();
   assert.equal(hasApiKey(), false);
   assert.equal(getApiKey(), null);
+  assert.equal(getPublicConfig().apiKeyUpdatedAt, null);
 });
 
 // loadConfig 内部有 cache；测试里要拿最新值需重置缓存模块状态。

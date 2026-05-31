@@ -10,11 +10,11 @@
  */
 import { join } from 'node:path';
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import { all } from '../db.js';
 import { upsertCapture } from '../store.js';
 import { SCREENSHOTS_DIR } from '../lib/paths.js';
 import { log } from '../lib/log.js';
+import { deriveMetrics } from '../../extension/extract-core.js';
 
 /**
  * 对所有开启了 monitor_enabled 的账号执行巡检。
@@ -126,20 +126,12 @@ export async function runPatrol(client, opts = {}) {
 async function patrolDouyin(client, acc, progress) {
   progress(`  打开主页: ${acc.homepage_url}`);
   await client.goto(acc.homepage_url);
-  await client.sleep(3000);
+  await client.sleep(4000);
+
+  await assertNotBlocked(client, 'douyin');
 
   // 获取最新视频链接
-  const postUrl = await client.evaluate(`
-    (() => {
-      // 抖音主页：寻找视频链接
-      const links = document.querySelectorAll('a[href*="/video/"]');
-      for (const a of links) {
-        const href = a.href || a.getAttribute('href');
-        if (href && href.includes('/video/')) return a.href || (location.origin + href);
-      }
-      return null;
-    })()
-  `);
+  const postUrl = await waitForPostUrl(client, 'douyin');
 
   if (!postUrl) {
     progress('  未找到最新视频链接');
@@ -149,46 +141,10 @@ async function patrolDouyin(client, acc, progress) {
   progress(`  进入最新视频: ${postUrl}`);
   await client.goto(postUrl);
   await client.sleep(4000);
+  await assertNotBlocked(client, 'douyin');
 
   // 提取数据
-  const data = await client.evaluate(`
-    (() => {
-      const getText = (selectors) => {
-        for (const s of selectors) {
-          const el = document.querySelector(s);
-          if (el && el.innerText && el.innerText.trim()) return el.innerText.trim();
-        }
-        return null;
-      };
-
-      return {
-        like: getText([
-          '[data-e2e="video-player-digg"]',
-          '[data-e2e="digg-count"]',
-          '.like-cnt',
-        ]),
-        share: getText([
-          '[data-e2e="video-player-share"]',
-          '[data-e2e="share-count"]',
-          '.share-cnt',
-        ]),
-        comment: getText([
-          '[data-e2e="comment-count"]',
-          '.comment-cnt',
-        ]),
-        pubTime: getText([
-          'span[data-e2e="video-author-publishtime"]',
-          '.video-publish-time',
-        ]),
-        title: getText([
-          'h1.video-title',
-          '[data-e2e="video-desc"]',
-          'h1',
-        ]),
-        pageUrl: window.location.href,
-      };
-    })()
-  `);
+  const data = buildCaptureData(await extractPageRaw(client, 'douyin'), 'douyin');
 
   progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}`);
 
@@ -202,26 +158,11 @@ async function patrolDouyin(client, acc, progress) {
 async function patrolXiaohongshu(client, acc, progress) {
   progress(`  打开主页: ${acc.homepage_url}`);
   await client.goto(acc.homepage_url);
-  await client.sleep(4000);
+  await client.sleep(5000);
+  await assertNotBlocked(client, 'xiaohongshu');
 
   // 获取最新笔记链接
-  const postUrl = await client.evaluate(`
-    (() => {
-      // 小红书主页：寻找笔记链接
-      const links = document.querySelectorAll('a[href*="/explore/"], a[href*="/discovery/item/"]');
-      for (const a of links) {
-        const href = a.href || a.getAttribute('href');
-        if (href) return a.href || (location.origin + href);
-      }
-      // 备用：找 section 里的第一个链接
-      const section = document.querySelector('[class*="note-list"], [class*="user-note"]');
-      if (section) {
-        const a = section.querySelector('a');
-        if (a) return a.href;
-      }
-      return null;
-    })()
-  `);
+  const postUrl = await waitForPostUrl(client, 'xiaohongshu');
 
   if (!postUrl) {
     progress('  未找到最新笔记链接');
@@ -230,50 +171,10 @@ async function patrolXiaohongshu(client, acc, progress) {
 
   progress(`  进入最新笔记: ${postUrl}`);
   await client.goto(postUrl);
-  await client.sleep(3000);
+  await client.sleep(4000);
+  await assertNotBlocked(client, 'xiaohongshu');
 
-  const data = await client.evaluate(`
-    (() => {
-      const getText = (selectors) => {
-        for (const s of selectors) {
-          const el = document.querySelector(s);
-          if (el && el.innerText && el.innerText.trim()) return el.innerText.trim();
-        }
-        return null;
-      };
-
-      return {
-        like: getText([
-          '.interact-container .like-wrapper .count',
-          '[class*="like"] [class*="count"]',
-          'span.like-count',
-        ]),
-        share: getText([
-          '.interact-container .share-wrapper .count',
-          '[class*="share"] [class*="count"]',
-        ]),
-        comment: getText([
-          '.interact-container .chat-wrapper .count',
-          '[class*="comment"] [class*="count"]',
-        ]),
-        favorite: getText([
-          '.interact-container .collect-wrapper .count',
-          '[class*="collect"] [class*="count"]',
-        ]),
-        pubTime: getText([
-          '.bottom-container .date',
-          '.note-publish-date',
-          '[class*="date"]',
-        ]),
-        title: getText([
-          '#detail-title',
-          '.note-title',
-          'h1',
-        ]),
-        pageUrl: window.location.href,
-      };
-    })()
-  `);
+  const data = buildCaptureData(await extractPageRaw(client, 'xiaohongshu'), 'xiaohongshu');
 
   progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}`);
 
@@ -286,6 +187,155 @@ async function patrolXiaohongshu(client, acc, progress) {
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
+
+function postLinkScript(platform) {
+  return `
+    (() => {
+      const platform = ${JSON.stringify(platform)};
+      const toAbs = (href) => {
+        try { return new URL(href, location.href).href; } catch { return null; }
+      };
+      const isVisible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 4 && rect.height > 4 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const isDetail = (url) => {
+        if (!url) return false;
+        try {
+          const u = new URL(url);
+          if (platform === 'douyin') return /\\/video\\/[^/?#]+/.test(u.pathname);
+          if (platform === 'xiaohongshu') {
+            return /\\/explore\\/[^/?#]+/.test(u.pathname) || /\\/discovery\\/item\\/[^/?#]+/.test(u.pathname);
+          }
+        } catch {}
+        return false;
+      };
+      const links = [...document.querySelectorAll('a[href]')];
+      for (const a of links) {
+        const href = toAbs(a.getAttribute('href') || a.href);
+        if (isDetail(href) && isVisible(a)) return href;
+      }
+      for (const a of links) {
+        const href = toAbs(a.getAttribute('href') || a.href);
+        if (isDetail(href)) return href;
+      }
+      return null;
+    })()
+  `;
+}
+
+async function waitForPostUrl(client, platform, timeoutMs = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const url = await client.evaluate(postLinkScript(platform));
+    if (url) return url;
+    await client.sleep(700);
+  }
+  return null;
+}
+
+async function assertNotBlocked(client, platform) {
+  const state = await client.evaluate(`
+    (() => ({
+      title: document.title || '',
+      url: location.href,
+      text: (document.body && document.body.innerText || '').slice(0, 1000),
+    }))()
+  `);
+  const haystack = `${state.title}\n${state.url}\n${state.text}`;
+  if (/验证码|安全验证|滑动验证|captcha|verify|登录后查看/.test(haystack)) {
+    throw new Error(`${platform === 'douyin' ? '抖音' : '小红书'}页面被登录/验证码拦截，请使用已登录 Chrome 资料目录后重试`);
+  }
+}
+
+async function extractPageRaw(client, platform) {
+  return client.evaluate(`
+    (() => {
+      const platform = ${JSON.stringify(platform)};
+      const textOf = (el) => {
+        if (!el) return null;
+        return (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim() || null;
+      };
+      const getText = (selectors) => {
+        for (const s of selectors) {
+          const el = document.querySelector(s);
+          const text = textOf(el);
+          if (text) return text;
+        }
+        return null;
+      };
+      const meta = (name) => document.querySelector(\`meta[property="\${name}"], meta[name="\${name}"]\`)?.content || '';
+      const scripts = [...document.querySelectorAll('script:not([src]), script[type="application/json"]')]
+        .map((s) => s.textContent || '')
+        .filter((s) => /(digg|share|comment|collect|liked|interact|aweme|note)/i.test(s))
+        .slice(0, 12)
+        .map((s) => s.slice(0, 250000));
+      for (const key of ['__INITIAL_STATE__', '__NUXT__', '__NEXT_DATA__', 'SIGI_STATE']) {
+        try {
+          const v = window[key];
+          if (v) scripts.unshift(JSON.stringify(v).slice(0, 250000));
+        } catch {}
+      }
+      const ariaText = [...document.querySelectorAll('[aria-label], [title]')]
+        .map((el) => [el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' '))
+        .filter(Boolean)
+        .join('\\n')
+        .slice(0, 30000);
+      const bodyText = (document.body?.innerText || '').slice(0, 50000);
+      const common = {
+        dataBlobs: scripts,
+        textSample: [bodyText, ariaText].filter(Boolean).join('\\n'),
+        pageUrl: location.href,
+      };
+      if (platform === 'douyin') {
+        return {
+          ...common,
+          domTexts: {
+            like: getText(['[data-e2e="video-player-digg"]', '[data-e2e="digg-count"]', '.like-cnt', '[aria-label*="点赞"]']),
+            share: getText(['[data-e2e="video-player-share"]', '[data-e2e="share-count"]', '.share-cnt', '[aria-label*="分享"]', '[aria-label*="转发"]']),
+            comment: getText(['[data-e2e="comment-count"]', '.comment-cnt', '[aria-label*="评论"]']),
+            favorite: getText(['[data-e2e*="collect"]', '[aria-label*="收藏"]']),
+          },
+          title: getText(['h1.video-title', '[data-e2e="video-desc"]', 'h1']) || meta('og:title') || document.title,
+          pubTime: getText(['span[data-e2e="video-author-publishtime"]', '.video-publish-time', 'time']) || document.querySelector('time')?.dateTime || null,
+          contentType: 'video',
+        };
+      }
+      return {
+        ...common,
+        domTexts: {
+          like: getText(['.interact-container .like-wrapper .count', '[class*="like-wrapper"] .count', '[class*="like"] [class*="count"]', '[aria-label*="点赞"]']),
+          share: getText(['.interact-container .share-wrapper .count', '[class*="share-wrapper"] .count', '[class*="share"] [class*="count"]', '[aria-label*="分享"]', '[aria-label*="转发"]']),
+          comment: getText(['.interact-container .chat-wrapper .count', '[class*="comment-wrapper"] .count', '[class*="comment"] [class*="count"]', '[aria-label*="评论"]']),
+          favorite: getText(['.interact-container .collect-wrapper .count', '[class*="collect-wrapper"] .count', '[class*="collect"] [class*="count"]', '[aria-label*="收藏"]']),
+        },
+        title: getText(['#detail-title', '.note-title', '[class*="title"]', 'h1']) || meta('og:title') || document.title,
+        pubTime: getText(['.bottom-container .date', '.note-publish-date', '[class*="date"]', 'time']) || document.querySelector('time')?.dateTime || null,
+        contentType: 'article',
+      };
+    })()
+  `);
+}
+
+function buildCaptureData(raw, platform) {
+  const metrics = deriveMetrics(raw);
+  return {
+    ...metrics,
+    title: cleanupTitle(raw.title, platform),
+    pubTime: raw.pubTime,
+    pageUrl: raw.pageUrl,
+    contentType: raw.contentType,
+  };
+}
+
+function cleanupTitle(title, platform) {
+  const s = String(title || '').trim();
+  if (!s) return '';
+  if (platform === 'xiaohongshu') return s.replace(/\s*-\s*小红书\s*$/, '').trim();
+  if (platform === 'douyin') return s.replace(/\s*-\s*抖音\s*$/, '').trim();
+  return s;
+}
 
 /**
  * 截图并保存到 data/screenshots/。
@@ -316,7 +366,7 @@ function saveData(acc, url, data, screenshotPath) {
     author_name: acc.nickname,
     url: url,
     title: data.title || '无标题',
-    content_type: 'video',
+    content_type: data.contentType || 'video',
     metrics_raw: {
       like: data.like,
       share: data.share,
@@ -375,9 +425,15 @@ function parseHumanTime(str) {
 // 如果是直接运行该脚本，则自动执行（向后兼容）
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { CDPClient } = await import('./cdp.js');
+  const { launchChrome, killChrome } = await import('./chrome-launcher.js');
+  const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
   const client = new CDPClient();
-  await client.connect(9222);
-  const result = await runPatrol(client, { onProgress: console.log });
-  console.log(JSON.stringify(result, null, 2));
-  client.close();
+  try {
+    await client.connect(chrome.port);
+    const result = await runPatrol(client, { onProgress: console.log });
+    console.log(JSON.stringify(result, null, 2));
+  } finally {
+    client.close();
+    if (chrome.child) killChrome(chrome.child);
+  }
 }
